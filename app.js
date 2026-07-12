@@ -179,7 +179,7 @@ function generateState() {
   return Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ===== TOKEN STORAGE — sessionStorage only, no cookies =====
+// ===== TOKEN STORAGE — localStorage refresh token, no cookies =====
 function clearTokens() {
   accessToken = null;
   refreshToken = null;
