@@ -1,4 +1,4 @@
 Wattsnear/
 wattsnear-site/
 *.pyc
-__pycache__/
+__pycache__/.playwright-mcp/

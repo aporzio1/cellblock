@@ -283,7 +283,7 @@ function renderDashboard() {
   if (circle && typeof soc === 'number') {
     const circumference = 2 * Math.PI * 85;
     circle.style.strokeDashoffset = circumference - (soc / 100) * circumference;
-    circle.style.stroke = soc > 20 ? '#00ff88' : soc > 10 ? '#ffaa00' : '#ff4444';
+    circle.style.stroke = soc > 20 ? '#57c7ff' : soc > 10 ? '#f5a623' : '#ff5c5c';
   }
   setEl('soc-value', typeof soc === 'number' ? `${Math.round(soc)}%` : '--%');
   setEl('range-value', typeof range === 'number' ? `Range: ${Math.round(range)} mi` : 'Range: -- mi');
@@ -293,12 +293,12 @@ function renderDashboard() {
   const badge = refs['charge-status'];
   if (chargeStatus) {
     badge.textContent = chargeStatus.replace(/_/g, ' ');
-    badge.style.background = chargeStatus.includes('CHARGING') ? 'rgba(0,255,136,0.15)' : 'rgba(68,136,255,0.15)';
-    badge.style.color = chargeStatus.includes('CHARGING') ? '#00ff88' : '#4488ff';
+    badge.style.background = chargeStatus.includes('CHARGING') ? 'rgba(61,220,151,0.15)' : 'rgba(139,147,255,0.15)';
+    badge.style.color = chargeStatus.includes('CHARGING') ? '#3ddc97' : '#8b93ff';
   } else if (!fetchOk.battery) {
     badge.textContent = 'Data unavailable';
-    badge.style.background = 'rgba(255,68,68,0.15)';
-    badge.style.color = '#ff4444';
+    badge.style.background = 'rgba(255,92,92,0.15)';
+    badge.style.color = '#ff5c5c';
   }
 
   // Pack overview
@@ -548,8 +548,8 @@ function updateCellSpreadChart() {
         datasets: [{
           label: 'Cell Voltage Spread (mV)',
           data: values,
-          borderColor: '#00ff88',
-          backgroundColor: 'rgba(0,255,136,0.1)',
+          borderColor: '#57c7ff',
+          backgroundColor: 'rgba(87,199,255,0.1)',
           fill: true,
           tension: 0.3,
           pointRadius: 3
