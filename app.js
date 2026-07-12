@@ -18,6 +18,27 @@ let vinCache = null;               // VIN doesn't change, fetch once
 let cellSpreadChart = null;
 let refs = {};                     // cached DOM lookups
 
+// Shared door label map (used by renderDoors + the top-level alert strip)
+const DOOR_LABELS = {
+  driverFrontDoor: 'Driver Front', passengerFrontDoor: 'Passenger Front',
+  driverRearDoor: 'Driver Rear', passengerRearDoor: 'Passenger Rear',
+  liftgate: 'Liftgate', hood: 'Hood', fuelDoor: 'Fuel Door'
+};
+
+// Tire PSI thresholds
+const TIRE_DANGER = { low: 28, high: 48 };
+const TIRE_WARN = { low: 32, high: 44 };
+const TIRE_LABELS = { 'tire-fl': 'Front Left', 'tire-fr': 'Front Right', 'tire-rl': 'Rear Left', 'tire-rr': 'Rear Right' };
+
+// SOC gauge geometry — 270deg arc (see index.html transform="rotate(135 ...)")
+const SOC_ARC_LENGTH = 2 * Math.PI * 85 * 0.75; // ~400.55
+
+// Resolve a CSS custom property to its computed value — needed for contexts
+// (like Chart.js canvas rendering) that can't parse var() directly.
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
 // ===== INIT — single path =====
 document.addEventListener('DOMContentLoaded', () => {
   cacheDom();
@@ -39,7 +60,8 @@ function cacheDom() {
     'gen-speed','gen-torque','gen-current','gen-temp',
     'mot-speed','mot-torque','mot-current','mot-temp',
     'doors-grid','health-alerts','charging-log','ota-info','cell-spread-chart',
-    'tire-fl','tire-fr','tire-rl','tire-rr'
+    'tire-fl','tire-fr','tire-rl','tire-rr',
+    'last-update','top-alerts','badge-vehicle','badge-tire'
   ];
   for (const id of ids) refs[id] = document.getElementById(id);
 }
@@ -214,6 +236,7 @@ async function refreshAccessToken() {
 // ===== DATA FETCHING =====
 async function refreshData() {
   setStatus('Updating...');
+  toggleLoading(true);
 
   try {
     if (!vinCache) {
@@ -250,9 +273,20 @@ async function refreshData() {
 
     renderDashboard();
     setStatus('Updated just now');
+    setEl('last-update', `Last updated: ${new Date().toLocaleTimeString()}`);
   } catch (err) {
     console.error(err);
     setStatus('Error loading data');
+  } finally {
+    toggleLoading(false);
+  }
+}
+
+// Cheap loading feedback — pulse the primary readouts while a fetch is in flight
+function toggleLoading(isLoading) {
+  const ids = ['soc-value', 'range-value', 'pack-voltage', 'battery-temp', 'charge-rate'];
+  for (const id of ids) {
+    if (refs[id]) refs[id].classList.toggle('loading', isLoading);
   }
 }
 
@@ -275,9 +309,8 @@ function renderDashboard() {
   const range = battery?.data?.estimatedRange ?? battery?.data?.evEstimatedRange;
   const circle = refs['soc-circle'];
   if (circle && typeof soc === 'number') {
-    const circumference = 2 * Math.PI * 85;
-    circle.style.strokeDashoffset = circumference - (soc / 100) * circumference;
-    circle.style.stroke = soc > 20 ? '#57c7ff' : soc > 10 ? '#f5a623' : '#ff5c5c';
+    circle.style.strokeDashoffset = SOC_ARC_LENGTH - (soc / 100) * SOC_ARC_LENGTH;
+    circle.style.stroke = soc > 20 ? 'var(--accent)' : soc > 10 ? 'var(--warn)' : 'var(--danger)';
   }
   setEl('soc-value', typeof soc === 'number' ? `${Math.round(soc)}%` : '--%');
   setEl('range-value', typeof range === 'number' ? `Range: ${Math.round(range)} mi` : 'Range: -- mi');
@@ -287,12 +320,16 @@ function renderDashboard() {
   const badge = refs['charge-status'];
   if (chargeStatus) {
     badge.textContent = chargeStatus.replace(/_/g, ' ');
-    badge.style.background = chargeStatus.includes('CHARGING') ? 'rgba(61,220,151,0.15)' : 'rgba(139,147,255,0.15)';
-    badge.style.color = chargeStatus.includes('CHARGING') ? '#3ddc97' : '#8b93ff';
+    badge.style.background = chargeStatus.includes('CHARGING') ? 'var(--good-soft)' : 'var(--info-soft)';
+    badge.style.color = chargeStatus.includes('CHARGING') ? 'var(--good)' : 'var(--info)';
   } else if (!fetchOk.battery) {
     badge.textContent = 'Data unavailable';
-    badge.style.background = 'rgba(255,92,92,0.15)';
-    badge.style.color = '#ff5c5c';
+    badge.style.background = 'var(--danger-soft)';
+    badge.style.color = 'var(--danger)';
+  } else {
+    badge.textContent = '—';
+    badge.style.background = 'transparent';
+    badge.style.color = 'var(--text-dim)';
   }
 
   // Pack overview
@@ -342,13 +379,17 @@ function renderDashboard() {
   }
 
   // Tires
+  let tireIssues = [];
   if (tires?.data) {
     const t = tires.data;
-    setTire('tire-fl', t.frontLeft?.pressure);
-    setTire('tire-fr', t.frontRight?.pressure);
-    setTire('tire-rl', t.rearLeft?.pressure);
-    setTire('tire-rr', t.rearRight?.pressure);
+    tireIssues = [
+      setTire('tire-fl', t.frontLeft?.pressure),
+      setTire('tire-fr', t.frontRight?.pressure),
+      setTire('tire-rl', t.rearLeft?.pressure),
+      setTire('tire-rr', t.rearRight?.pressure)
+    ].filter(Boolean);
   }
+  setBadge('badge-tire', tireIssues.length);
 
   // Motors
   if (motors?.data) {
@@ -380,15 +421,103 @@ function renderDashboard() {
   }
 
   // Sub-renderers (all DOM-safe)
-  renderDoors(doors?.data);
-  renderAlerts(health?.data);
+  const openDoorCount = renderDoors(doors?.data);
+  const activeAlertCount = renderAlerts(health?.data);
   renderCharging(charging?.data);
   renderOTA(ota?.data);
+
+  setBadge('badge-vehicle', openDoorCount + activeAlertCount);
+  renderTopAlerts(doors?.data, health?.data, tireIssues);
 }
 
+// Colors a tire tile by PSI threshold and returns an issue descriptor
+// (or null if the tire is within normal range) for the badge/alert-strip counts.
 function setTire(id, val) {
   const el = refs[id];
-  if (el) el.querySelector('.tire-val').textContent = fmt(val, 0, 'PSI');
+  if (!el) return null;
+
+  el.querySelector('.tire-val').textContent = fmt(val, 0, 'PSI');
+  el.classList.remove('tire-warn', 'tire-danger');
+
+  if (typeof val !== 'number') return null;
+
+  if (val < TIRE_DANGER.low || val > TIRE_DANGER.high) {
+    el.classList.add('tire-danger');
+    return { label: TIRE_LABELS[id], value: val, severity: 'CRITICAL' };
+  }
+  if (val < TIRE_WARN.low || val > TIRE_WARN.high) {
+    el.classList.add('tire-warn');
+    return { label: TIRE_LABELS[id], value: val, severity: 'WARNING' };
+  }
+  return null;
+}
+
+// Small severity glyph so status isn't color-only (colorblind-safe)
+function severityGlyph(sev) {
+  return sev === 'CRITICAL' || sev === 'WARNING' ? '▲' : '●';
+}
+
+function setBadge(id, count) {
+  const el = refs[id];
+  if (!el) return;
+  if (count > 0) {
+    el.textContent = `● ${count}`;
+    el.classList.add('badge-active');
+  } else {
+    el.textContent = '';
+    el.classList.remove('badge-active');
+  }
+}
+
+// Builds the at-a-glance strip shown above the fold — surfaces the same
+// signals that live inside the (closed-by-default) accordions below.
+function renderTopAlerts(doorsData, healthData, tireIssues) {
+  const strip = refs['top-alerts'];
+  if (!strip) return;
+  strip.replaceChildren();
+
+  const items = [];
+
+  if (healthData?.alerts?.length) {
+    for (const alert of healthData.alerts) {
+      if (alert.severity === 'CRITICAL' || alert.severity === 'WARNING') {
+        items.push({ severity: alert.severity, text: alert.description || alert.code || 'Vehicle alert' });
+      }
+    }
+  }
+
+  if (doorsData) {
+    for (const [key, label] of Object.entries(DOOR_LABELS)) {
+      if (doorsData[key] === 'OPEN') {
+        items.push({ severity: 'WARNING', text: `${label} is open` });
+      }
+    }
+  }
+
+  for (const issue of tireIssues) {
+    items.push({ severity: issue.severity, text: `${issue.label} tire at ${issue.value} PSI` });
+  }
+
+  if (!items.length) {
+    strip.style.display = 'none';
+    return;
+  }
+
+  strip.style.display = 'flex';
+  for (const item of items) {
+    const sevCls = item.severity === 'CRITICAL' ? 'alert-critical' : 'alert-warning';
+    const div = document.createElement('div');
+    div.className = 'alert-item ' + sevCls;
+
+    const glyph = document.createElement('span');
+    glyph.className = 'alert-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = severityGlyph(item.severity);
+    div.appendChild(glyph);
+
+    div.appendChild(document.createTextNode(item.text));
+    strip.appendChild(div);
+  }
 }
 
 function setMotor(prefix, data) {
@@ -400,23 +529,20 @@ function setMotor(prefix, data) {
 }
 
 // ===== SAFE HTML RENDERERS =====
+// Returns the number of open doors, for the Vehicle Status badge.
 function renderDoors(data) {
   const grid = refs['doors-grid'];
   grid.replaceChildren();  // safer than innerHTML = ''
 
-  if (!data) { grid.textContent = ''; return; }
-
-  const doorMap = {
-    driverFrontDoor: 'Driver Front', passengerFrontDoor: 'Passenger Front',
-    driverRearDoor: 'Driver Rear', passengerRearDoor: 'Passenger Rear',
-    liftgate: 'Liftgate', hood: 'Hood', fuelDoor: 'Fuel Door'
-  };
+  if (!data) { grid.textContent = ''; return 0; }
 
   let any = false;
-  for (const [key, label] of Object.entries(doorMap)) {
+  let openCount = 0;
+  for (const [key, label] of Object.entries(DOOR_LABELS)) {
     const status = data[key];
     if (!status) continue;
     any = true;
+    if (status === 'OPEN') openCount++;
     const div = document.createElement('div');
     div.className = 'door-item ' + (status === 'OPEN' ? 'door-open' : status === 'CLOSED' ? 'door-closed' : 'door-locked');
     div.appendChild(document.createTextNode(label));
@@ -426,8 +552,10 @@ function renderDoors(data) {
   }
 
   if (!any) grid.textContent = 'No door data available.';
+  return openCount;
 }
 
+// Returns the number of CRITICAL/WARNING alerts, for the Vehicle Status badge.
 function renderAlerts(data) {
   const container = refs['health-alerts'];
   container.replaceChildren();
@@ -437,15 +565,23 @@ function renderAlerts(data) {
     p.style.color = 'var(--text-dim)';
     p.textContent = 'No active alerts.';
     container.appendChild(p);
-    return;
+    return 0;
   }
 
+  let activeCount = 0;
   for (const alert of data.alerts.slice(0, 10)) {
     const sevCls = alert.severity === 'CRITICAL' ? 'alert-critical' :
                    alert.severity === 'WARNING' ? 'alert-warning' : 'alert-info';
+    if (alert.severity === 'CRITICAL' || alert.severity === 'WARNING') activeCount++;
 
     const div = document.createElement('div');
     div.className = 'alert-item ' + sevCls;
+
+    const glyph = document.createElement('span');
+    glyph.className = 'alert-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = severityGlyph(alert.severity);
+    div.appendChild(glyph);
 
     const strong = document.createElement('strong');
     strong.textContent = `[${alert.severity}]`;
@@ -455,6 +591,7 @@ function renderAlerts(data) {
     div.appendChild(document.createTextNode(' ' + desc));
     container.appendChild(div);
   }
+  return activeCount;
 }
 
 function renderCharging(data) {
@@ -492,7 +629,10 @@ function renderCharging(data) {
     table.appendChild(tr);
   }
 
-  el.appendChild(table);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'table-scroll';
+  wrapper.appendChild(table);
+  el.appendChild(wrapper);
 }
 
 function renderOTA(data) {
@@ -535,6 +675,11 @@ function updateCellSpreadChart() {
   const values = cellSpreadHistory.map(({ value }) => value);
 
   if (!cellSpreadChart) {
+    const accent = cssVar('--accent');
+    const accentSoft = cssVar('--accent-soft');
+    const tickColor = cssVar('--text-dim');
+    const gridColor = cssVar('--border-soft');
+
     cellSpreadChart = new Chart(canvas.getContext('2d'), {
       type: 'line',
       data: {
@@ -542,8 +687,8 @@ function updateCellSpreadChart() {
         datasets: [{
           label: 'Cell Voltage Spread (mV)',
           data: values,
-          borderColor: '#57c7ff',
-          backgroundColor: 'rgba(87,199,255,0.1)',
+          borderColor: accent,
+          backgroundColor: accentSoft,
           fill: true,
           tension: 0.3,
           pointRadius: 3
@@ -553,8 +698,8 @@ function updateCellSpreadChart() {
         responsive: true,
         plugins: { legend: { display: false } },
         scales: {
-          x: { ticks: { color: '#8888aa', maxTicksLimit: 7 }, grid: { color: 'rgba(255,255,255,0.05)' } },
-          y: { ticks: { color: '#8888aa' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+          x: { ticks: { color: tickColor, maxTicksLimit: 7 }, grid: { color: gridColor } },
+          y: { ticks: { color: tickColor }, grid: { color: gridColor } }
         }
       }
     });
@@ -577,7 +722,7 @@ function showLogin() {
 function showDashboard() {
   refs['login-screen'].classList.remove('active');
   refs['dashboard'].classList.add('active');
-  refs['refresh-bar'].style.display = 'block';
+  refs['refresh-bar'].style.display = 'flex';
   refs['login-btn'].style.display = 'none';
   refs['logout-btn'].style.display = 'inline-block';
 }
@@ -592,10 +737,10 @@ function logout() {
 
 function toggleSection(btn) {
   const content = btn.nextElementSibling;
-  content.classList.toggle('open');
-  btn.textContent = content.classList.contains('open')
-    ? btn.textContent.replace(/\u25BE$/, '\u25B4')
-    : btn.textContent.replace(/\u25B4$/, '\u25BE');
+  const isOpen = content.classList.toggle('open');
+  btn.setAttribute('aria-expanded', String(isOpen));
+  const arrow = btn.querySelector('.toggle-arrow');
+  if (arrow) arrow.textContent = isOpen ? '\u25B4' : '\u25BE';
 }
 
 function setStatus(msg) {

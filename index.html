@@ -35,32 +35,21 @@
     <div class="top-row">
       <div class="card soc-card">
         <div class="soc-ring-container">
-          <svg viewBox="0 0 200 200" class="soc-ring">
-            <circle cx="100" cy="100" r="85" fill="none" stroke="var(--track)" stroke-width="10"/>
+          <svg viewBox="0 0 200 200" class="soc-ring" role="img" aria-label="State of charge gauge">
+            <!-- 270deg gauge arc: starts bottom-left (0%), sweeps clockwise through top (50%), ends bottom-right (100%) -->
+            <circle cx="100" cy="100" r="85" fill="none" stroke="var(--track)" stroke-width="10"
+              stroke-dasharray="400.55 534.07" stroke-linecap="round" transform="rotate(135 100 100)"/>
             <circle id="soc-circle" cx="100" cy="100" r="85" fill="none" stroke="var(--accent)" stroke-width="10"
-              stroke-dasharray="534" stroke-dashoffset="534" stroke-linecap="round" transform="rotate(-90 100 100)"/>
-            <g class="soc-ticks" stroke="var(--tick)" stroke-width="2">
+              stroke-dasharray="400.55 534.07" stroke-dashoffset="400.55" stroke-linecap="round"
+              transform="rotate(135 100 100)"/>
+            <g class="soc-major-ticks" stroke="var(--tick)" stroke-width="2">
+              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(-135 100 100)"/>
               <line x1="100" y1="6" x2="100" y2="18" transform="rotate(0 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(18 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(36 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(54 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(72 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(90 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(108 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(126 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(144 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(162 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(180 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(198 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(216 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(234 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(252 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(270 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(288 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(306 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(324 100 100)"/>
-              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(342 100 100)"/>
+              <line x1="100" y1="6" x2="100" y2="18" transform="rotate(135 100 100)"/>
             </g>
+            <text x="56.16" y="143.84" class="soc-tick-label">0</text>
+            <text x="100" y="38" class="soc-tick-label">50</text>
+            <text x="143.84" y="143.84" class="soc-tick-label">100</text>
           </svg>
           <div class="soc-center">
             <div id="soc-value" class="soc-number">--%</div>
@@ -68,7 +57,7 @@
           </div>
         </div>
         <div class="charge-info">
-          <div id="charge-status" class="charge-badge">Charging Status</div>
+          <div id="charge-status" class="charge-badge">—</div>
           <div id="last-update" class="last-update">Last updated: --</div>
         </div>
       </div>
@@ -89,13 +78,12 @@
             <span class="stat-label">Charge Rate</span>
             <span id="charge-rate" class="stat-value">-- kW</span>
           </div>
-          <div class="stat-item">
-            <span class="stat-label">VIN</span>
-            <span id="vin-display" class="stat-value vin">---</span>
-          </div>
         </div>
       </div>
     </div>
+
+    <!-- At-a-glance alert strip — hidden unless something needs attention -->
+    <div id="top-alerts" class="top-alerts" style="display:none;" role="alert" aria-live="polite"></div>
 
     <!-- Battery Health -->
     <div class="card health-card">
@@ -132,10 +120,26 @@
       </div>
     </div>
 
-    <!-- Collapsible Sections -->
+    <!-- Collapsible Sections — ordered by priority (safety/status first) -->
     <div class="collapsible-section">
-      <button class="collapse-toggle" onclick="toggleSection(this)">Tire Pressure ▾</button>
-      <div class="collapse-content">
+      <button class="collapse-toggle" aria-expanded="true" aria-controls="content-vehicle" onclick="toggleSection(this)">
+        <span class="toggle-label">Vehicle Status</span>
+        <span class="badge-count" id="badge-vehicle"></span>
+        <span class="toggle-arrow" aria-hidden="true">▴</span>
+      </button>
+      <div class="collapse-content open" id="content-vehicle">
+        <div class="doors-grid" id="doors-grid"></div>
+        <div class="health-alerts" id="health-alerts"></div>
+      </div>
+    </div>
+
+    <div class="collapsible-section">
+      <button class="collapse-toggle" aria-expanded="false" aria-controls="content-tires" onclick="toggleSection(this)">
+        <span class="toggle-label">Tire Pressure</span>
+        <span class="badge-count" id="badge-tire"></span>
+        <span class="toggle-arrow" aria-hidden="true">▾</span>
+      </button>
+      <div class="collapse-content" id="content-tires">
         <div class="tire-grid">
           <div class="tire-item" id="tire-fl"><div class="tire-label">Front Left</div><div class="tire-val">-- PSI</div></div>
           <div class="tire-item" id="tire-fr"><div class="tire-label">Front Right</div><div class="tire-val">-- PSI</div></div>
@@ -146,18 +150,22 @@
     </div>
 
     <div class="collapsible-section">
-      <button class="collapse-toggle" onclick="toggleSection(this)">Motor Telemetry ▾</button>
-      <div class="collapse-content">
+      <button class="collapse-toggle" aria-expanded="false" aria-controls="content-motors" onclick="toggleSection(this)">
+        <span class="toggle-label">Motor Telemetry</span>
+        <span class="badge-count"></span>
+        <span class="toggle-arrow" aria-hidden="true">▾</span>
+      </button>
+      <div class="collapse-content" id="content-motors">
         <div class="motor-grid">
           <div class="motor-item">
-            <h4>Front Motor (Generator)</h4>
+            <h4>Front Drive Unit</h4>
             <div class="motor-stat"><span class="label">Speed</span><span id="gen-speed" class="val">-- RPM</span></div>
             <div class="motor-stat"><span class="label">Torque</span><span id="gen-torque" class="val">-- Nm</span></div>
             <div class="motor-stat"><span class="label">Current</span><span id="gen-current" class="val">-- A</span></div>
             <div class="motor-stat"><span class="label">Controller Temp</span><span id="gen-temp" class="val">-- °F</span></div>
           </div>
           <div class="motor-item">
-            <h4>Rear Motor (Motor)</h4>
+            <h4>Rear Drive Unit</h4>
             <div class="motor-stat"><span class="label">Speed</span><span id="mot-speed" class="val">-- RPM</span></div>
             <div class="motor-stat"><span class="label">Torque</span><span id="mot-torque" class="val">-- Nm</span></div>
             <div class="motor-stat"><span class="label">Current</span><span id="mot-current" class="val">-- A</span></div>
@@ -168,8 +176,12 @@
     </div>
 
     <div class="collapsible-section">
-      <button class="collapse-toggle" onclick="toggleSection(this)">HVAC ▾</button>
-      <div class="collapse-content">
+      <button class="collapse-toggle" aria-expanded="false" aria-controls="content-hvac" onclick="toggleSection(this)">
+        <span class="toggle-label">HVAC</span>
+        <span class="badge-count"></span>
+        <span class="toggle-arrow" aria-hidden="true">▾</span>
+      </button>
+      <div class="collapse-content" id="content-hvac">
         <div class="hvac-grid">
           <div class="hvac-item"><span class="label">Cabin Temp</span><span id="cabin-temp" class="val">-- °F</span></div>
           <div class="hvac-item"><span class="label">Target Temp</span><span id="target-temp" class="val">-- °F</span></div>
@@ -182,16 +194,12 @@
     </div>
 
     <div class="collapsible-section">
-      <button class="collapse-toggle" onclick="toggleSection(this)">Vehicle Status ▾</button>
-      <div class="collapse-content">
-        <div class="doors-grid" id="doors-grid"></div>
-        <div class="health-alerts" id="health-alerts"></div>
-      </div>
-    </div>
-
-    <div class="collapsible-section">
-      <button class="collapse-toggle" onclick="toggleSection(this)">GPS & Movement ▾</button>
-      <div class="collapse-content">
+      <button class="collapse-toggle" aria-expanded="false" aria-controls="content-gps" onclick="toggleSection(this)">
+        <span class="toggle-label">GPS &amp; Movement</span>
+        <span class="badge-count"></span>
+        <span class="toggle-arrow" aria-hidden="true">▾</span>
+      </button>
+      <div class="collapse-content" id="content-gps">
         <div class="gps-grid">
           <div class="gps-item"><span class="label">Latitude</span><span id="lat" class="val">--</span></div>
           <div class="gps-item"><span class="label">Longitude</span><span id="lon" class="val">--</span></div>
@@ -204,22 +212,31 @@
     </div>
 
     <div class="collapsible-section">
-      <button class="collapse-toggle" onclick="toggleSection(this)">Charging History ▾</button>
-      <div class="collapse-content">
+      <button class="collapse-toggle" aria-expanded="false" aria-controls="content-charging" onclick="toggleSection(this)">
+        <span class="toggle-label">Charging History</span>
+        <span class="badge-count"></span>
+        <span class="toggle-arrow" aria-hidden="true">▾</span>
+      </button>
+      <div class="collapse-content" id="content-charging">
         <div id="charging-log" class="charging-log">No charging sessions recorded.</div>
       </div>
     </div>
 
     <div class="collapsible-section">
-      <button class="collapse-toggle" onclick="toggleSection(this)">OTA Updates ▾</button>
-      <div class="collapse-content">
+      <button class="collapse-toggle" aria-expanded="false" aria-controls="content-ota" onclick="toggleSection(this)">
+        <span class="toggle-label">OTA Updates</span>
+        <span class="badge-count"></span>
+        <span class="toggle-arrow" aria-hidden="true">▾</span>
+      </button>
+      <div class="collapse-content" id="content-ota">
         <div id="ota-info" class="ota-info">Loading...</div>
       </div>
     </div>
   </div>
 
-  <!-- Refresh button -->
-  <div id="refresh-bar" style="display:none; text-align:center; padding: 1rem;">
+  <!-- Footer: VIN + refresh -->
+  <div id="refresh-bar" style="display:none;">
+    <span id="vin-display" class="vin-footer">---</span>
     <button class="btn-secondary" onclick="refreshData()">⟳ Refresh Data</button>
   </div>
 </div>
