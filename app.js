@@ -1,39 +1,67 @@
-// ===== Ford Dashboard App =====
+// ===== Lightning Rod — Ford Telemetry Dashboard =====
 
 // ===== CONFIG =====
-const CLIENT_ID = 'YOUR_CLIENT_ID'; // Register at developer.ford.com
-const REDIRECT_URI = encodeURIComponent(window.location.origin + window.location.pathname);
+const CLIENT_ID = 'YOUR_CLIENT_ID';
+const REDIRECT_URI = window.location.origin + window.location.pathname;
 const FORD_AUTH_URL = 'https://login.ford.com/as/authorization.oauth2';
 const FORD_TOKEN_URL = 'https://login.ford.com/as/token.oauth2';
 const API_BASE = 'https://api.vehicle.ford.com';
-const TOKEN_COOKIE = 'ford_token';
-const REFRESH_COOKIE = 'ford_refresh';
+const REFRESH_KEY = 'ford_refresh';
 
 // ===== STATE =====
 let accessToken = null;
 let refreshToken = null;
 let vehicleData = {};
 let cellSpreadHistory = [];
+let refreshPromise = null;         // single-flight guard
+let vinCache = null;               // VIN doesn't change, fetch once
+let cellSpreadChart = null;
+let refs = {};                     // cached DOM lookups
 
-// ===== INIT =====
+// ===== INIT — single path =====
 document.addEventListener('DOMContentLoaded', () => {
-  const tokens = loadTokens();
-  if (tokens?.access) {
-    accessToken = tokens.access;
-    refreshToken = tokens.refresh;
+  cacheDom();
+  if (new URLSearchParams(window.location.search).has('code')) {
+    handleCallback();
+  } else {
+    loadSession();
+  }
+});
+
+function cacheDom() {
+  const ids = [
+    'login-screen','dashboard','refresh-bar','login-btn','logout-btn',
+    'connection-status','soc-circle','soc-value','range-value','charge-status',
+    'pack-voltage','battery-temp','charge-rate','vin-display',
+    'health-score','min-cell-v','max-cell-v','cell-spread','min-cell-t','max-cell-t','temp-spread',
+    'cabin-temp','target-temp','fan-speed','zone1-mode','zone2-mode','defrost',
+    'lat','lon','alt','heading','speed','accel',
+    'gen-speed','gen-torque','gen-current','gen-temp',
+    'mot-speed','mot-torque','mot-current','mot-temp',
+    'doors-grid','health-alerts','charging-log','ota-info','cell-spread-chart',
+    'tire-fl','tire-fr','tire-rl','tire-rr'
+  ];
+  for (const id of ids) refs[id] = document.getElementById(id);
+}
+
+function loadSession() {
+  refreshToken = sessionStorage.getItem(REFRESH_KEY);
+  if (refreshToken) {
     showDashboard();
     refreshData();
   } else {
     showLogin();
   }
-});
+}
 
 // ===== AUTH =====
-function startLogin() {
+async function startLogin() {
   const state = generateState();
   const codeVerifier = generatePKCECodeVerifier();
   sessionStorage.setItem('code_verifier', codeVerifier);
   sessionStorage.setItem('auth_state', state);
+
+  const codeChallenge = await generatePKCECodeChallenge(codeVerifier);
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -41,7 +69,7 @@ function startLogin() {
     redirect_uri: REDIRECT_URI,
     scope: 'openid profile vehicle_data',
     state: state,
-    code_challenge: generatePKCECodeChallenge(codeVerifier),
+    code_challenge: codeChallenge,
     code_challenge_method: 'S256'
   });
 
@@ -53,18 +81,26 @@ function handleCallback() {
   const code = urlParams.get('code');
   const state = urlParams.get('state');
 
-  if (!code || !state) return;
+  if (!code || !state) { loadSession(); return; }
 
   const savedState = sessionStorage.getItem('auth_state');
   if (state !== savedState) {
-    showError('Invalid auth state');
+    showError('Invalid auth state — session may have expired. Please try again.');
+    history.replaceState(null, '', window.location.pathname);
+    loadSession();
     return;
   }
 
   const codeVerifier = sessionStorage.getItem('code_verifier');
+  if (!codeVerifier) {
+    showError('Missing code verifier — session may have expired. Please try again.');
+    history.replaceState(null, '', window.location.pathname);
+    loadSession();
+    return;
+  }
+
   sessionStorage.removeItem('code_verifier');
   sessionStorage.removeItem('auth_state');
-
   exchangeCodeForToken(code, codeVerifier);
 }
 
@@ -76,18 +112,22 @@ async function exchangeCodeForToken(code, codeVerifier) {
       body: new URLSearchParams({
         grant_type: 'authorization_code',
         code: code,
-        redirect_uri: decodeURIComponent(REDIRECT_URI),
+        redirect_uri: REDIRECT_URI,
         client_id: CLIENT_ID,
         code_verifier: codeVerifier
       })
     });
 
-    if (!resp.ok) throw new Error('Token exchange failed');
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`Token exchange failed (${resp.status}): ${body}`);
+    }
 
     const data = await resp.json();
-    saveTokens(data.access_token, data.refresh_token);
     accessToken = data.access_token;
     refreshToken = data.refresh_token;
+    sessionStorage.setItem(REFRESH_KEY, refreshToken);
+    history.replaceState(null, '', window.location.pathname);
     showDashboard();
     refreshData();
   } catch (err) {
@@ -99,7 +139,8 @@ async function exchangeCodeForToken(code, codeVerifier) {
 function generatePKCECodeVerifier() {
   const array = new Uint8Array(32);
   crypto.getRandomValues(array);
-  return btoa(String.fromCharCode(...array)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return btoa(String.fromCharCode(...array))
+    .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 }
 
 async function generatePKCECodeChallenge(verifier) {
@@ -116,37 +157,22 @@ function generateState() {
   return Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ===== TOKEN STORAGE =====
-function saveTokens(access, refresh) {
-  document.cookie = `${TOKEN_COOKIE}=${access}; path=/; max-age=7200; Secure; SameSite=Lax`;
-  document.cookie = `${REFRESH_COOKIE}=${refresh}; path=/; max-age=604800; Secure; SameSite=Lax`;
-}
-
-function loadTokens() {
-  const getCookie = name => {
-    const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
-    return match ? match[2] : null;
-  };
-  const access = getCookie(TOKEN_COOKIE);
-  const refresh = getCookie(REFRESH_COOKIE);
-  if (access && refresh) return { access, refresh };
-  return null;
-}
-
+// ===== TOKEN STORAGE — sessionStorage only, no cookies =====
 function clearTokens() {
-  document.cookie = `${TOKEN_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-  document.cookie = `${REFRESH_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  accessToken = null;
+  refreshToken = null;
+  sessionStorage.removeItem(REFRESH_KEY);
 }
 
-// ===== API =====
-async function apiCall(endpoint) {
+// ===== API — single-flight refresh, one-deep retry =====
+async function apiCall(endpoint, retried = false) {
   const resp = await fetch(`${API_BASE}${endpoint}`, {
     headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
   });
 
-  if (resp.status === 401 && refreshToken) {
+  if (resp.status === 401 && refreshToken && !retried) {
     await refreshAccessToken();
-    return apiCall(endpoint);
+    return apiCall(endpoint, true);
   }
 
   if (!resp.ok) throw new Error(`API error: ${resp.status}`);
@@ -154,27 +180,35 @@ async function apiCall(endpoint) {
 }
 
 async function refreshAccessToken() {
-  try {
-    const resp = await fetch(FORD_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-        client_id: CLIENT_ID
-      })
-    });
+  if (refreshPromise) return refreshPromise;
 
-    if (!resp.ok) throw new Error('Refresh failed');
+  refreshPromise = (async () => {
+    try {
+      const resp = await fetch(FORD_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+          client_id: CLIENT_ID
+        })
+      });
 
-    const data = await resp.json();
-    saveTokens(data.access_token, data.refresh_token);
-    accessToken = data.access_token;
-    refreshToken = data.refresh_token;
-  } catch (err) {
-    logout();
-    throw err;
-  }
+      if (!resp.ok) throw new Error('Refresh failed');
+
+      const data = await resp.json();
+      accessToken = data.access_token;
+      refreshToken = data.refresh_token;
+      sessionStorage.setItem(REFRESH_KEY, refreshToken);
+    } catch (err) {
+      logout();
+      throw err;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
 }
 
 // ===== DATA FETCHING =====
@@ -182,30 +216,38 @@ async function refreshData() {
   setStatus('Updating...');
 
   try {
-    // Get vehicles list
-    const vehicles = await apiCall('/vehicles/v1/vehicles');
-    if (!vehicles?.data?.length) {
-      showError('No vehicles found');
-      return;
+    if (!vinCache) {
+      const vehicles = await apiCall('/vehicles/v1/vehicles');
+      if (!vehicles?.data?.length) {
+        showError('No vehicles found');
+        return;
+      }
+      vinCache = vehicles.data[0].vin;
     }
 
-    const vin = vehicles.data[0].vin;
-    document.getElementById('vin-display').textContent = vin;
+    refs['vin-display'].textContent = vinCache;
 
-    // Fetch all telemetry endpoints in parallel
-    const [battery, tires, motors, hvac, doors, gps, health, charging, ota] = await Promise.all([
-      apiCall(`/vehicles/v1/vehicles/${vin}/ev/battery`).catch(() => ({})),
-      apiCall(`/vehicles/v1/vehicles/${vin}/tires`).catch(() => ({})),
-      apiCall(`/vehicles/v1/vehicles/${vin}/motors`).catch(() => ({})),
-      apiCall(`/vehicles/v1/vehicles/${vin}/hvac`).catch(() => ({})),
-      apiCall(`/vehicles/v1/vehicles/${vin}/doors`).catch(() => ({})),
-      apiCall(`/vehicles/v1/vehicles/${vin}/gps`).catch(() => ({})),
-      apiCall(`/vehicles/v1/vehicles/${vin}/vehiclehealth`).catch(() => ({})),
-      apiCall(`/vehicles/v1/vehicles/${vin}/charginghistory`).catch(() => ({})),
-      apiCall(`/vehicles/v1/vehicles/${vin}/ota`).catch(() => ({}))
-    ]);
+    const endpoints = [
+      `ev/battery`, `tires`, `motors`, `hvac`, `doors`,
+      `gps`, `vehiclehealth`, `charginghistory`, `ota`
+    ];
 
-    vehicleData = { battery, tires, motors, hvac, doors, gps, health, charging, ota, vin };
+    const results = await Promise.all(
+      endpoints.map(e => apiCall(`/vehicles/v1/vehicles/${vinCache}/${e}`).catch(() => null))
+    );
+
+    const [battery, tires, motors, hvac, doors, gps, health, charging, ota] = results;
+
+    vehicleData = {
+      battery, tires, motors, hvac, doors, gps, health, charging, ota,
+      vin: vinCache,
+      fetchOk: {
+        battery: !!battery, tires: !!tires, motors: !!motors,
+        hvac: !!hvac, doors: !!doors, gps: !!gps,
+        health: !!health, charging: !!charging, ota: !!ota
+      }
+    };
+
     renderDashboard();
     setStatus('Updated just now');
   } catch (err) {
@@ -214,275 +256,343 @@ async function refreshData() {
   }
 }
 
+// ===== FORMAT HELPERS =====
+function fmt(val, digits, unit) {
+  if (typeof val !== 'number' || isNaN(val)) return '--';
+  return `${val.toFixed(digits)}${unit ? ' ' + unit : ''}`;
+}
+
+const h = str => {
+  const d = document.createElement('span');
+  d.textContent = str;
+  return d.innerHTML;  // safe — textContent always escapes
+};
+
+function setEl(id, text) {
+  if (refs[id]) refs[id].textContent = text;
+}
+
 // ===== RENDERING =====
 function renderDashboard() {
-  const { battery, tires, motors, hvac, doors, gps, health, charging, ota } = vehicleData;
+  const { battery, tires, motors, hvac, doors, gps, health, charging, ota, fetchOk } = vehicleData;
 
   // SOC Ring
-  const soc = battery?.data?.stateOfCharge ?? battery?.data?.evBatteryStateOfCharge ?? 0;
-  const range = battery?.data?.estimatedRange ?? battery?.data?.evEstimatedRange ?? 0;
-  const circle = document.getElementById('soc-circle');
-  const circumference = 2 * Math.PI * 85;
-  const offset = circumference - (soc / 100) * circumference;
-  circle.style.strokeDashoffset = offset;
-  circle.style.stroke = soc > 20 ? '#00ff88' : soc > 10 ? '#ffaa00' : '#ff4444';
-  document.getElementById('soc-value').textContent = `${Math.round(soc)}%`;
-  document.getElementById('range-value').textContent = `Range: ${Math.round(range)} mi`;
+  const soc = battery?.data?.stateOfCharge ?? battery?.data?.evBatteryStateOfCharge;
+  const range = battery?.data?.estimatedRange ?? battery?.data?.evEstimatedRange;
+  const circle = refs['soc-circle'];
+  if (circle && typeof soc === 'number') {
+    const circumference = 2 * Math.PI * 85;
+    circle.style.strokeDashoffset = circumference - (soc / 100) * circumference;
+    circle.style.stroke = soc > 20 ? '#00ff88' : soc > 10 ? '#ffaa00' : '#ff4444';
+  }
+  setEl('soc-value', typeof soc === 'number' ? `${Math.round(soc)}%` : '--%');
+  setEl('range-value', typeof range === 'number' ? `Range: ${Math.round(range)} mi` : 'Range: -- mi');
 
   // Charge status
-  const chargeStatus = battery?.data?.chargeStatus ?? battery?.data?.evChargeStatus ?? 'Unknown';
-  const badge = document.getElementById('charge-status');
-  badge.textContent = chargeStatus.replace(/_/g, ' ');
-  badge.style.background = chargeStatus.includes('CHARGING') ? 'rgba(0,255,136,0.15)' : 'rgba(68,136,255,0.15)';
-  badge.style.color = chargeStatus.includes('CHARGING') ? '#00ff88' : '#4488ff';
-
-  // Pack overview
-  const packV = battery?.data?.evBatteryTotalVoltage ?? battery?.data?.batteryVoltage ?? '--';
-  const packT = battery?.data?.evBatteryTemperature ?? battery?.data?.batteryTemp ?? '--';
-  const chargeRate = battery?.data?.evChargingRateKW ?? battery?.data?.chargeRate ?? '--';
-  document.getElementById('pack-voltage').textContent = typeof packV === 'number' ? `${packV.toFixed(0)} V` : packV;
-  document.getElementById('battery-temp').textContent = typeof packT === 'number' ? `${packT.toFixed(0)} °F` : packT;
-  document.getElementById('charge-rate').textContent = typeof chargeRate === 'number' ? `${chargeRate.toFixed(1)} kW` : chargeRate;
-
-  // Battery health
-  const minCV = battery?.data?.evBatteryCellMinVoltage ?? battery?.data?.minCellVoltage ?? 0;
-  const maxCV = battery?.data?.evBatteryCellMaxVoltage ?? battery?.data?.maxCellVoltage ?? 0;
-  const minCT = battery?.data?.evBatteryCellMinTemp ?? battery?.data?.minCellTemp ?? 0;
-  const maxCT = battery?.data?.evBatteryCellMaxTemp ?? battery?.data?.maxCellTemp ?? 0;
-
-  const spreadMV = ((maxCV - minCV) * 1000).toFixed(1);
-  const tempSpread = (maxCT - minCT).toFixed(1);
-
-  document.getElementById('min-cell-v').textContent = `${minCV.toFixed(4)} V`;
-  document.getElementById('max-cell-v').textContent = `${maxCV.toFixed(4)} V`;
-  document.getElementById('cell-spread').textContent = `${spreadMV} mV`;
-  document.getElementById('min-cell-t').textContent = `${typeof minCT === 'number' ? minCT.toFixed(1) : minCT} °F`;
-  document.getElementById('max-cell-t').textContent = `${typeof maxCT === 'number' ? maxCT.toFixed(1) : maxCT} °F`;
-  document.getElementById('temp-spread').textContent = `${tempSpread} °F`;
-
-  // Health score
-  const scoreEl = document.getElementById('health-score');
-  const spreadNum = parseFloat(spreadMV);
-  if (spreadNum < 30) {
-    scoreEl.textContent = 'Excellent';
-    scoreEl.className = 'health-score health-good';
-  } else if (spreadNum < 60) {
-    scoreEl.textContent = 'Fair';
-    scoreEl.className = 'health-score health-warn';
-  } else {
-    scoreEl.textContent = 'Attention Needed';
-    scoreEl.className = 'health-score health-bad';
+  const chargeStatus = battery?.data?.chargeStatus ?? battery?.data?.evChargeStatus;
+  const badge = refs['charge-status'];
+  if (chargeStatus) {
+    badge.textContent = chargeStatus.replace(/_/g, ' ');
+    badge.style.background = chargeStatus.includes('CHARGING') ? 'rgba(0,255,136,0.15)' : 'rgba(68,136,255,0.15)';
+    badge.style.color = chargeStatus.includes('CHARGING') ? '#00ff88' : '#4488ff';
+  } else if (!fetchOk.battery) {
+    badge.textContent = 'Data unavailable';
+    badge.style.background = 'rgba(255,68,68,0.15)';
+    badge.style.color = '#ff4444';
   }
 
-  // Cell spread chart
-  cellSpreadHistory.push(parseFloat(spreadMV));
-  if (cellSpreadHistory.length > 30) cellSpreadHistory.shift();
-  updateCellSpreadChart();
+  // Pack overview
+  setEl('pack-voltage', fmt(battery?.data?.evBatteryTotalVoltage ?? battery?.data?.batteryVoltage, 0, 'V'));
+  setEl('battery-temp', fmt(battery?.data?.evBatteryTemperature ?? battery?.data?.batteryTemp, 0, '\u00B0F'));
+  setEl('charge-rate', fmt(battery?.data?.evChargingRateKW ?? battery?.data?.chargeRate, 1, 'kW'));
+
+  // Battery health — only render if battery data is present
+  if (fetchOk.battery) {
+    const minCV = battery?.data?.evBatteryCellMinVoltage ?? battery?.data?.minCellVoltage;
+    const maxCV = battery?.data?.evBatteryCellMaxVoltage ?? battery?.data?.maxCellVoltage;
+    const minCT = battery?.data?.evBatteryCellMinTemp ?? battery?.data?.minCellTemp;
+    const maxCT = battery?.data?.evBatteryCellMaxTemp ?? battery?.data?.maxCellTemp;
+
+    if (typeof minCV === 'number' && typeof maxCV === 'number') {
+      setEl('min-cell-v', fmt(minCV, 4, 'V'));
+      setEl('max-cell-v', fmt(maxCV, 4, 'V'));
+      setEl('cell-spread', `${((maxCV - minCV) * 1000).toFixed(1)} mV`);
+      setEl('min-cell-t', fmt(minCT, 1, '\u00B0F'));
+      setEl('max-cell-t', fmt(maxCT, 1, '\u00B0F'));
+      setEl('temp-spread', typeof minCT === 'number' && typeof maxCT === 'number'
+        ? `${(maxCT - minCT).toFixed(1)} \u00B0F`
+        : '-- \u00B0F');
+
+      const spreadMV = (maxCV - minCV) * 1000;
+      const scoreEl = refs['health-score'];
+      if (spreadMV < 30) {
+        scoreEl.textContent = 'Excellent';
+        scoreEl.className = 'health-score health-good';
+      } else if (spreadMV < 60) {
+        scoreEl.textContent = 'Fair';
+        scoreEl.className = 'health-score health-warn';
+      } else {
+        scoreEl.textContent = 'Attention Needed';
+        scoreEl.className = 'health-score health-bad';
+      }
+
+      // Cell spread chart — store real timestamps
+      cellSpreadHistory.push({ ts: Date.now(), value: spreadMV });
+      if (cellSpreadHistory.length > 30) cellSpreadHistory.shift();
+      updateCellSpreadChart();
+    }
+  } else {
+    const scoreEl = refs['health-score'];
+    scoreEl.textContent = 'No data';
+    scoreEl.className = 'health-score health-bad';
+  }
 
   // Tires
   if (tires?.data) {
     const t = tires.data;
-    setTire('tire-fl', t.frontLeft?.pressure ?? '--');
-    setTire('tire-fr', t.frontRight?.pressure ?? '--');
-    setTire('tire-rl', t.rearLeft?.pressure ?? '--');
-    setTire('tire-rr', t.rearRight?.pressure ?? '--');
+    setTire('tire-fl', t.frontLeft?.pressure);
+    setTire('tire-fr', t.frontRight?.pressure);
+    setTire('tire-rl', t.rearLeft?.pressure);
+    setTire('tire-rr', t.rearRight?.pressure);
   }
 
   // Motors
   if (motors?.data) {
-    const m = motors.data;
-    if (m.generator) {
-      document.getElementById('gen-speed').textContent = `${m.generator.speed ?? '--'} RPM`;
-      document.getElementById('gen-torque').textContent = `${m.generator.torque ?? '--'} Nm`;
-      document.getElementById('gen-current').textContent = `${m.generator.current ?? '--'} A`;
-      document.getElementById('gen-temp').textContent = `${m.generator.controllerTemp ?? '--'} °F`;
-    }
-    if (m.motor) {
-      document.getElementById('mot-speed').textContent = `${m.motor.speed ?? '--'} RPM`;
-      document.getElementById('mot-torque').textContent = `${m.motor.torque ?? '--'} Nm`;
-      document.getElementById('mot-current').textContent = `${m.motor.current ?? '--'} A`;
-      document.getElementById('mot-temp').textContent = `${m.motor.controllerTemp ?? '--'} °F`;
-    }
+    setMotor('gen', motors.data.generator);
+    setMotor('mot', motors.data.motor);
   }
 
   // HVAC
   if (hvac?.data) {
-    const h = hvac.data;
-    document.getElementById('cabin-temp').textContent = `${h.cabinTemperature ?? '--'} °F`;
-    document.getElementById('target-temp').textContent = `${h.targetTemperature ?? '--'} °F`;
-    document.getElementById('fan-speed').textContent = h.fanSpeed ?? '--';
-    document.getElementById('zone1-mode').textContent = h.zone1Mode ?? '--';
-    document.getElementById('zone2-mode').textContent = h.zone2Mode ?? '--';
-    document.getElementById('defrost').textContent = h.defrost ?? '--';
+    const hd = hvac.data;
+    setEl('cabin-temp', fmt(hd.cabinTemperature, 1, '\u00B0F'));
+    setEl('target-temp', fmt(hd.targetTemperature, 1, '\u00B0F'));
+    setEl('fan-speed', hd.fanSpeed ?? '--');
+    setEl('zone1-mode', hd.zone1Mode ?? '--');
+    setEl('zone2-mode', hd.zone2Mode ?? '--');
+    setEl('defrost', hd.defrost ?? '--');
   }
-
-  // Doors
-  renderDoors(doors?.data);
 
   // GPS
   if (gps?.data) {
-    const g = gps.data;
-    document.getElementById('lat').textContent = g.latitude ?? '--';
-    document.getElementById('lon').textContent = g.longitude ?? '--';
-    document.getElementById('alt').textContent = `${g.altitude ?? '--'} ft`;
-    document.getElementById('heading').textContent = `${g.heading ?? '--'}°`;
-    document.getElementById('speed').textContent = `${g.speed ?? '--'} mph`;
-    const acc = g.acceleration;
-    document.getElementById('accel').textContent = acc ? `${acc.x}/${acc.y}/${acc.z} g` : '--/--/-- g';
+    const gd = gps.data;
+    setEl('lat', gd.latitude ?? '--');
+    setEl('lon', gd.longitude ?? '--');
+    setEl('alt', gd.altitude ? `${gd.altitude} ft` : '-- ft');
+    setEl('heading', gd.heading != null ? `${gd.heading}\u00B0` : '--\u00B0');
+    setEl('speed', gd.speed != null ? `${gd.speed} mph` : '-- mph');
+    const acc = gd.acceleration;
+    setEl('accel', acc ? `${acc.x}/${acc.y}/${acc.z} g` : '--/--/-- g');
   }
 
-  // Vehicle health alerts
+  // Sub-renderers (all DOM-safe)
+  renderDoors(doors?.data);
   renderAlerts(health?.data);
-
-  // Charging history
   renderCharging(charging?.data);
-
-  // OTA
   renderOTA(ota?.data);
 }
 
 function setTire(id, val) {
-  const el = document.getElementById(id);
-  if (el) {
-    el.querySelector('.tire-val').textContent = typeof val === 'number' ? `${val.toFixed(0)} PSI` : val;
-  }
+  const el = refs[id];
+  if (el) el.querySelector('.tire-val').textContent = fmt(val, 0, 'PSI');
 }
 
+function setMotor(prefix, data) {
+  if (!data) return;
+  setEl(`${prefix}-speed`, `${data.speed ?? '--'} RPM`);
+  setEl(`${prefix}-torque`, `${data.torque ?? '--'} Nm`);
+  setEl(`${prefix}-current`, `${data.current ?? '--'} A`);
+  setEl(`${prefix}-temp`, fmt(data.controllerTemp, 1, '\u00B0F'));
+}
+
+// ===== SAFE HTML RENDERERS =====
 function renderDoors(data) {
-  const grid = document.getElementById('doors-grid');
-  if (!data) { grid.innerHTML = ''; return; }
+  const grid = refs['doors-grid'];
+  grid.replaceChildren();  // safer than innerHTML = ''
+
+  if (!data) { grid.textContent = ''; return; }
 
   const doorMap = {
-    driverFrontDoor: 'Driver Front',
-    passengerFrontDoor: 'Passenger Front',
-    driverRearDoor: 'Driver Rear',
-    passengerRearDoor: 'Passenger Rear',
-    liftgate: 'Liftgate',
-    hood: 'Hood',
-    fuelDoor: 'Fuel Door'
+    driverFrontDoor: 'Driver Front', passengerFrontDoor: 'Passenger Front',
+    driverRearDoor: 'Driver Rear', passengerRearDoor: 'Passenger Rear',
+    liftgate: 'Liftgate', hood: 'Hood', fuelDoor: 'Fuel Door'
   };
 
-  let html = '';
+  let any = false;
   for (const [key, label] of Object.entries(doorMap)) {
     const status = data[key];
     if (!status) continue;
-    const cls = status === 'OPEN' ? 'door-open' : status === 'CLOSED' ? 'door-closed' : 'door-locked';
-    html += `<div class="door-item ${cls}">${label}<br>${status}</div>`;
+    any = true;
+    const div = document.createElement('div');
+    div.className = 'door-item ' + (status === 'OPEN' ? 'door-open' : status === 'CLOSED' ? 'door-closed' : 'door-locked');
+    div.appendChild(document.createTextNode(label));
+    div.appendChild(document.createElement('br'));
+    div.appendChild(document.createTextNode(status));
+    grid.appendChild(div);
   }
-  grid.innerHTML = html || 'No door data available.';
+
+  if (!any) grid.textContent = 'No door data available.';
 }
 
 function renderAlerts(data) {
-  const container = document.getElementById('health-alerts');
+  const container = refs['health-alerts'];
+  container.replaceChildren();
+
   if (!data?.alerts?.length) {
-    container.innerHTML = '<p style="color:var(--text-dim)">No active alerts.</p>';
+    const p = document.createElement('p');
+    p.style.color = 'var(--text-dim)';
+    p.textContent = 'No active alerts.';
+    container.appendChild(p);
     return;
   }
 
-  let html = '';
   for (const alert of data.alerts.slice(0, 10)) {
     const sevCls = alert.severity === 'CRITICAL' ? 'alert-critical' :
                    alert.severity === 'WARNING' ? 'alert-warning' : 'alert-info';
-    html += `<div class="alert-item ${sevCls}">
-      <strong>[${alert.severity}]</strong> ${alert.description || alert.code || 'Unknown alert'}
-    </div>`;
+
+    const div = document.createElement('div');
+    div.className = 'alert-item ' + sevCls;
+
+    const strong = document.createElement('strong');
+    strong.textContent = `[${alert.severity}]`;
+    div.appendChild(strong);
+
+    const desc = alert.description || alert.code || 'Unknown alert';
+    div.appendChild(document.createTextNode(' ' + desc));
+    container.appendChild(div);
   }
-  container.innerHTML = html;
 }
 
 function renderCharging(data) {
-  const el = document.getElementById('charging-log');
+  const el = refs['charging-log'];
+  el.replaceChildren();
+
   if (!data?.sessions?.length) {
-    el.innerHTML = 'No charging sessions recorded.';
+    el.textContent = 'No charging sessions recorded.';
     return;
   }
 
-  let html = '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">';
-  html += '<tr style="color:var(--text-dim)"><th>Date</th><th>Type</th><th>Energy</th><th>Duration</th></tr>';
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%;font-size:0.85rem;border-collapse:collapse';
+
+  const thead = document.createElement('tr');
+  thead.style.color = 'var(--text-dim)';
+  ['Date','Type','Energy','Duration'].forEach(hdr => {
+    const th = document.createElement('th');
+    th.textContent = hdr;
+    thead.appendChild(th);
+  });
+  table.appendChild(thead);
+
   for (const s of data.sessions.slice(0, 10)) {
-    html += `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:0.5rem 0">${s.date || '--'}</td>
-      <td>${s.type || '--'}</td>
-      <td>${s.energyAdded ?? '--'}</td>
-      <td>${s.duration ?? '--'}</td>
-    </tr>`;
+    const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid var(--border)';
+
+    const cells = [s.date, s.type, s.energyAdded, s.duration];
+    cells.forEach(c => {
+      const td = document.createElement('td');
+      td.style.padding = '0.5rem 0';
+      td.textContent = c ?? '--';
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
   }
-  html += '</table>';
-  el.innerHTML = html;
+
+  el.appendChild(table);
 }
 
 function renderOTA(data) {
-  const el = document.getElementById('ota-info');
-  if (!data) { el.innerHTML = 'No OTA data available.'; return; }
+  const el = refs['ota-info'];
+  el.replaceChildren();
 
-  let html = '';
-  if (data.version) html += `<div><strong>Current Version:</strong> ${data.version}</div>`;
-  if (data.availableVersion) html += `<div><strong>Update Available:</strong> ${data.availableVersion}</div>`;
-  if (data.schedule) html += `<div><strong>Scheduled:</strong> ${data.schedule}</div>`;
-  if (data.optIn) html += `<div><strong>Auto-opt-in:</strong> ${data.optIn ? 'Yes' : 'No'}</div>`;
-  if (data.status) html += `<div><strong>Status:</strong> ${data.status}</div>`;
-  el.innerHTML = html || 'No OTA data available.';
+  if (!data) { el.textContent = 'No OTA data available.'; return; }
+
+  const fields = [
+    ['Current Version', data.version],
+    ['Update Available', data.availableVersion],
+    ['Scheduled', data.schedule],
+    ['Auto-opt-in', data.optIn != null ? (data.optIn ? 'Yes' : 'No') : null],
+    ['Status', data.status]
+  ];
+
+  let any = false;
+  for (const [label, value] of fields) {
+    if (!value) continue;
+    any = true;
+    const div = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = label + ': ';
+    div.appendChild(strong);
+    div.appendChild(document.createTextNode(value));
+    el.appendChild(div);
+  }
+
+  if (!any) el.textContent = 'No OTA data available.';
 }
 
-// ===== CHART =====
-let cellSpreadChart = null;
-
+// ===== CHART — create once, update in place =====
 function updateCellSpreadChart() {
-  const ctx = document.getElementById('cell-spread-chart').getContext('2d');
+  const canvas = refs['cell-spread-chart'];
+  if (!canvas) return;
 
-  if (cellSpreadChart) cellSpreadChart.destroy();
-
-  const labels = cellSpreadHistory.map((_, i) => {
-    const d = new Date(Date.now() - (cellSpreadHistory.length - i) * 86400000);
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const labels = cellSpreadHistory.map(({ ts }) => {
+    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   });
+  const values = cellSpreadHistory.map(({ value }) => value);
 
-  cellSpreadChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: 'Cell Voltage Spread (mV)',
-        data: cellSpreadHistory,
-        borderColor: '#00ff88',
-        backgroundColor: 'rgba(0,255,136,0.1)',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 3
-      }]
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { color: '#8888aa', maxTicksLimit: 7 }, grid: { color: 'rgba(255,255,255,0.05)' } },
-        y: { ticks: { color: '#8888aa' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+  if (!cellSpreadChart) {
+    cellSpreadChart = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Cell Voltage Spread (mV)',
+          data: values,
+          borderColor: '#00ff88',
+          backgroundColor: 'rgba(0,255,136,0.1)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#8888aa', maxTicksLimit: 7 }, grid: { color: 'rgba(255,255,255,0.05)' } },
+          y: { ticks: { color: '#8888aa' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+        }
       }
-    }
-  });
+    });
+  } else {
+    cellSpreadChart.data.labels = labels;
+    cellSpreadChart.data.datasets[0].data = values;
+    cellSpreadChart.update();
+  }
 }
 
 // ===== UI HELPERS =====
 function showLogin() {
-  document.getElementById('login-screen').classList.add('active');
-  document.getElementById('dashboard').classList.remove('active');
-  document.getElementById('refresh-bar').style.display = 'none';
-  document.getElementById('login-btn').style.display = 'inline-block';
-  document.getElementById('logout-btn').style.display = 'none';
+  refs['login-screen'].classList.add('active');
+  refs['dashboard'].classList.remove('active');
+  refs['refresh-bar'].style.display = 'none';
+  refs['login-btn'].style.display = 'inline-block';
+  refs['logout-btn'].style.display = 'none';
 }
 
 function showDashboard() {
-  document.getElementById('login-screen').classList.remove('active');
-  document.getElementById('dashboard').classList.add('active');
-  document.getElementById('refresh-bar').style.display = 'block';
-  document.getElementById('login-btn').style.display = 'none';
-  document.getElementById('logout-btn').style.display = 'inline-block';
+  refs['login-screen'].classList.remove('active');
+  refs['dashboard'].classList.add('active');
+  refs['refresh-bar'].style.display = 'block';
+  refs['login-btn'].style.display = 'none';
+  refs['logout-btn'].style.display = 'inline-block';
 }
 
 function logout() {
   clearTokens();
-  accessToken = null;
-  refreshToken = null;
+  vinCache = null;
+  cellSpreadHistory = [];
+  if (cellSpreadChart) { cellSpreadChart.destroy(); cellSpreadChart = null; }
   showLogin();
 }
 
@@ -490,12 +600,12 @@ function toggleSection(btn) {
   const content = btn.nextElementSibling;
   content.classList.toggle('open');
   btn.textContent = content.classList.contains('open')
-    ? btn.textContent.replace('▾', '▴')
-    : btn.textContent.replace('▴', '▾');
+    ? btn.textContent.replace(/\u25BE$/, '\u25B4')
+    : btn.textContent.replace(/\u25B4$/, '\u25BE');
 }
 
 function setStatus(msg) {
-  document.getElementById('connection-status').textContent = msg;
+  refs['connection-status'].textContent = msg;
 }
 
 function showError(msg) {
@@ -503,10 +613,5 @@ function showError(msg) {
   div.className = 'error-msg';
   div.textContent = msg;
   document.querySelector('.container').prepend(div);
-  setTimeout(() => div.remove(), 5000);
-}
-
-// Handle OAuth callback on page load
-if (window.location.search.includes('code=')) {
-  handleCallback();
+  setTimeout(() => div.remove(), 8000);
 }
