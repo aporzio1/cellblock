@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ford Dashboard</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="container">
+  <!-- Header -->
+  <header>
+    <div class="logo">⚡ Ford Dashboard</div>
+    <div id="status-bar">
+      <span id="connection-status">Connecting...</span>
+      <button id="login-btn" onclick="startLogin()">Login with Ford</button>
+      <button id="logout-btn" onclick="logout()" style="display:none;">Logout</button>
+    </div>
+  </header>
+
+  <!-- Login Screen -->
+  <div id="login-screen" class="screen active">
+    <div class="login-card">
+      <h1>Your Lightning</h1>
+      <p>View battery health, motor telemetry, tire pressure, and more — the data FordPass hides.</p>
+      <button class="btn-primary" onclick="startLogin()">Login with Ford</button>
+      <p class="note">No accounts stored. Tokens live in your browser only.</p>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashboard" class="screen">
+    <!-- Top Row: SoC + Status -->
+    <div class="top-row">
+      <div class="card soc-card">
+        <div class="soc-ring-container">
+          <svg viewBox="0 0 200 200" class="soc-ring">
+            <circle cx="100" cy="100" r="85" fill="none" stroke="#333" stroke-width="12"/>
+            <circle id="soc-circle" cx="100" cy="100" r="85" fill="none" stroke="#00ff88" stroke-width="12"
+              stroke-dasharray="534" stroke-dashoffset="534" stroke-linecap="round" transform="rotate(-90 100 100)"/>
+          </svg>
+          <div class="soc-center">
+            <div id="soc-value" class="soc-number">--%</div>
+            <div id="range-value" class="soc-range">Range: -- mi</div>
+          </div>
+        </div>
+        <div class="charge-info">
+          <div id="charge-status" class="charge-badge">Charging Status</div>
+          <div id="last-update" class="last-update">Last updated: --</div>
+        </div>
+      </div>
+
+      <!-- Quick Stats -->
+      <div class="card quick-stats">
+        <h3>Pack Overview</h3>
+        <div class="stat-grid">
+          <div class="stat-item">
+            <span class="stat-label">Pack Voltage</span>
+            <span id="pack-voltage" class="stat-value">-- V</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Battery Temp</span>
+            <span id="battery-temp" class="stat-value">-- °F</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Charge Rate</span>
+            <span id="charge-rate" class="stat-value">-- kW</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">VIN</span>
+            <span id="vin-display" class="stat-value vin">---</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Battery Health -->
+    <div class="card health-card">
+      <div class="card-header">
+        <h3>Battery Health</h3>
+        <div id="health-score" class="health-score">--</div>
+      </div>
+      <canvas id="cell-spread-chart" height="100"></canvas>
+      <div class="cell-data">
+        <div class="cell-stat">
+          <span class="cell-label">Min Cell Voltage</span>
+          <span id="min-cell-v" class="cell-val">-- V</span>
+        </div>
+        <div class="cell-stat">
+          <span class="cell-label">Max Cell Voltage</span>
+          <span id="max-cell-v" class="cell-val">-- V</span>
+        </div>
+        <div class="cell-stat">
+          <span class="cell-label">Cell Spread</span>
+          <span id="cell-spread" class="cell-val spread">-- mV</span>
+        </div>
+        <div class="cell-stat">
+          <span class="cell-label">Min Cell Temp</span>
+          <span id="min-cell-t" class="cell-val">-- °F</span>
+        </div>
+        <div class="cell-stat">
+          <span class="cell-label">Max Cell Temp</span>
+          <span id="max-cell-t" class="cell-val">-- °F</span>
+        </div>
+        <div class="cell-stat">
+          <span class="cell-label">Temp Spread</span>
+          <span id="temp-spread" class="cell-val spread">-- °F</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Collapsible Sections -->
+    <div class="collapsible-section">
+      <button class="collapse-toggle" onclick="toggleSection(this)">Tire Pressure ▾</button>
+      <div class="collapse-content">
+        <div class="tire-grid">
+          <div class="tire-item" id="tire-fl"><div class="tire-label">Front Left</div><div class="tire-val">-- PSI</div></div>
+          <div class="tire-item" id="tire-fr"><div class="tire-label">Front Right</div><div class="tire-val">-- PSI</div></div>
+          <div class="tire-item" id="tire-rl"><div class="tire-label">Rear Left</div><div class="tire-val">-- PSI</div></div>
+          <div class="tire-item" id="tire-rr"><div class="tire-label">Rear Right</div><div class="tire-val">-- PSI</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="collapsible-section">
+      <button class="collapse-toggle" onclick="toggleSection(this)">Motor Telemetry ▾</button>
+      <div class="collapse-content">
+        <div class="motor-grid">
+          <div class="motor-item">
+            <h4>Front Motor (Generator)</h4>
+            <div class="motor-stat"><span class="label">Speed</span><span id="gen-speed" class="val">-- RPM</span></div>
+            <div class="motor-stat"><span class="label">Torque</span><span id="gen-torque" class="val">-- Nm</span></div>
+            <div class="motor-stat"><span class="label">Current</span><span id="gen-current" class="val">-- A</span></div>
+            <div class="motor-stat"><span class="label">Controller Temp</span><span id="gen-temp" class="val">-- °F</span></div>
+          </div>
+          <div class="motor-item">
+            <h4>Rear Motor (Motor)</h4>
+            <div class="motor-stat"><span class="label">Speed</span><span id="mot-speed" class="val">-- RPM</span></div>
+            <div class="motor-stat"><span class="label">Torque</span><span id="mot-torque" class="val">-- Nm</span></div>
+            <div class="motor-stat"><span class="label">Current</span><span id="mot-current" class="val">-- A</span></div>
+            <div class="motor-stat"><span class="label">Controller Temp</span><span id="mot-temp" class="val">-- °F</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="collapsible-section">
+      <button class="collapse-toggle" onclick="toggleSection(this)">HVAC ▾</button>
+      <div class="collapse-content">
+        <div class="hvac-grid">
+          <div class="hvac-item"><span class="label">Cabin Temp</span><span id="cabin-temp" class="val">-- °F</span></div>
+          <div class="hvac-item"><span class="label">Target Temp</span><span id="target-temp" class="val">-- °F</span></div>
+          <div class="hvac-item"><span class="label">Fan Speed</span><span id="fan-speed" class="val">--</span></div>
+          <div class="hvac-item"><span class="label">Zone 1 Mode</span><span id="zone1-mode" class="val">--</span></div>
+          <div class="hvac-item"><span class="label">Zone 2 Mode</span><span id="zone2-mode" class="val">--</span></div>
+          <div class="hvac-item"><span class="label">Defrost</span><span id="defrost" class="val">--</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="collapsible-section">
+      <button class="collapse-toggle" onclick="toggleSection(this)">Vehicle Status ▾</button>
+      <div class="collapse-content">
+        <div class="doors-grid" id="doors-grid"></div>
+        <div class="health-alerts" id="health-alerts"></div>
+      </div>
+    </div>
+
+    <div class="collapsible-section">
+      <button class="collapse-toggle" onclick="toggleSection(this)">GPS & Movement ▾</button>
+      <div class="collapse-content">
+        <div class="gps-grid">
+          <div class="gps-item"><span class="label">Latitude</span><span id="lat" class="val">--</span></div>
+          <div class="gps-item"><span class="label">Longitude</span><span id="lon" class="val">--</span></div>
+          <div class="gps-item"><span class="label">Altitude</span><span id="alt" class="val">-- ft</span></div>
+          <div class="gps-item"><span class="label">Heading</span><span id="heading" class="val">--°</span></div>
+          <div class="gps-item"><span class="label">Speed</span><span id="speed" class="val">-- mph</span></div>
+          <div class="gps-item"><span class="label">Accel X/Y/Z</span><span id="accel" class="val">--/--/-- g</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="collapsible-section">
+      <button class="collapse-toggle" onclick="toggleSection(this)">Charging History ▾</button>
+      <div class="collapse-content">
+        <div id="charging-log" class="charging-log">No charging sessions recorded.</div>
+      </div>
+    </div>
+
+    <div class="collapsible-section">
+      <button class="collapse-toggle" onclick="toggleSection(this)">OTA Updates ▾</button>
+      <div class="collapse-content">
+        <div id="ota-info" class="ota-info">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Refresh button -->
+  <div id="refresh-bar" style="display:none; text-align:center; padding: 1rem;">
+    <button class="btn-secondary" onclick="refreshData()">⟳ Refresh Data</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
