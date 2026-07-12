@@ -616,6 +616,13 @@ button:focus-visible,
   50% { opacity: 0.4; }
 }
 
+/* Unavailable-section note */
+.unavailable-note {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
 /* Error state */
 .error-msg {
   background: var(--danger-soft);

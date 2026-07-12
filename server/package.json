@@ -1,0 +1,10 @@
+{
+  "name": "lightning-rod-token-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal token-exchange proxy holding FordConnect's client_secret so it never reaches the browser.",
+  "scripts": {
+    "start": "node --env-file=.env index.js"
+  }
+}

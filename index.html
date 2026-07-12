@@ -156,22 +156,7 @@
         <span class="toggle-arrow" aria-hidden="true">▾</span>
       </button>
       <div class="collapse-content" id="content-motors">
-        <div class="motor-grid">
-          <div class="motor-item">
-            <h4>Front Drive Unit</h4>
-            <div class="motor-stat"><span class="label">Speed</span><span id="gen-speed" class="val">-- RPM</span></div>
-            <div class="motor-stat"><span class="label">Torque</span><span id="gen-torque" class="val">-- Nm</span></div>
-            <div class="motor-stat"><span class="label">Current</span><span id="gen-current" class="val">-- A</span></div>
-            <div class="motor-stat"><span class="label">Controller Temp</span><span id="gen-temp" class="val">-- °F</span></div>
-          </div>
-          <div class="motor-item">
-            <h4>Rear Drive Unit</h4>
-            <div class="motor-stat"><span class="label">Speed</span><span id="mot-speed" class="val">-- RPM</span></div>
-            <div class="motor-stat"><span class="label">Torque</span><span id="mot-torque" class="val">-- Nm</span></div>
-            <div class="motor-stat"><span class="label">Current</span><span id="mot-current" class="val">-- A</span></div>
-            <div class="motor-stat"><span class="label">Controller Temp</span><span id="mot-temp" class="val">-- °F</span></div>
-          </div>
-        </div>
+        <p class="unavailable-note">Not available via the FordConnect API.</p>
       </div>
     </div>
 
@@ -182,14 +167,7 @@
         <span class="toggle-arrow" aria-hidden="true">▾</span>
       </button>
       <div class="collapse-content" id="content-hvac">
-        <div class="hvac-grid">
-          <div class="hvac-item"><span class="label">Cabin Temp</span><span id="cabin-temp" class="val">-- °F</span></div>
-          <div class="hvac-item"><span class="label">Target Temp</span><span id="target-temp" class="val">-- °F</span></div>
-          <div class="hvac-item"><span class="label">Fan Speed</span><span id="fan-speed" class="val">--</span></div>
-          <div class="hvac-item"><span class="label">Zone 1 Mode</span><span id="zone1-mode" class="val">--</span></div>
-          <div class="hvac-item"><span class="label">Zone 2 Mode</span><span id="zone2-mode" class="val">--</span></div>
-          <div class="hvac-item"><span class="label">Defrost</span><span id="defrost" class="val">--</span></div>
-        </div>
+        <p class="unavailable-note">Not available via the FordConnect API.</p>
       </div>
     </div>
 
@@ -218,7 +196,7 @@
         <span class="toggle-arrow" aria-hidden="true">▾</span>
       </button>
       <div class="collapse-content" id="content-charging">
-        <div id="charging-log" class="charging-log">No charging sessions recorded.</div>
+        <p class="unavailable-note">Not available via the FordConnect API. Closest real endpoints are Wallbox and Charging Station Activity, which have a different data shape (station-scoped, not a vehicle session log) — not wired up in this pass.</p>
       </div>
     </div>
 
@@ -229,7 +207,7 @@
         <span class="toggle-arrow" aria-hidden="true">▾</span>
       </button>
       <div class="collapse-content" id="content-ota">
-        <div id="ota-info" class="ota-info">Loading...</div>
+        <p class="unavailable-note">Not available via the FordConnect API.</p>
       </div>
     </div>
   </div>
