@@ -7,6 +7,10 @@ const FORD_AUTH_URL = 'https://login.ford.com/as/authorization.oauth2';
 const FORD_TOKEN_URL = 'https://login.ford.com/as/token.oauth2';
 const API_BASE = 'https://api.vehicle.ford.com';
 const REFRESH_KEY = 'ford_refresh';
+// Fallback bound on refresh-token lifetime when Ford's token response doesn't
+// tell us its own expiry. See the TOKEN STORAGE section below for the
+// security rationale and a longer-term server-side recommendation.
+const REFRESH_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 
 // ===== STATE =====
 let accessToken = null;
@@ -67,7 +71,7 @@ function cacheDom() {
 }
 
 function loadSession() {
-  refreshToken = localStorage.getItem(REFRESH_KEY);
+  refreshToken = loadRefreshToken();
   if (refreshToken) {
     showDashboard();
     refreshData();
@@ -148,7 +152,7 @@ async function exchangeCodeForToken(code, codeVerifier) {
     const data = await resp.json();
     accessToken = data.access_token;
     refreshToken = data.refresh_token;
-    localStorage.setItem(REFRESH_KEY, refreshToken);
+    saveRefreshToken(refreshToken, data.refresh_token_expires_in);
     history.replaceState(null, '', window.location.pathname);
     showDashboard();
     refreshData();
@@ -179,7 +183,50 @@ function generateState() {
   return Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ===== TOKEN STORAGE — localStorage refresh token, no cookies =====
+// ===== TOKEN STORAGE =====
+// Access token: memory only, never persisted.
+// Refresh token: localStorage, wrapped with an explicit expiry so a stolen
+// token (e.g. via XSS) is only useful for a bounded window instead of
+// indefinitely — sessionStorage would force a Ford re-login every browser
+// restart, which was rejected for UX; a bare localStorage string (the prior
+// state) had no expiry at all.
+//
+// SECURITY NOTE / FUTURE WORK: this is a client-side mitigation, not a fix.
+// Any JS-readable storage (localStorage or sessionStorage) is fully exposed
+// to an XSS bug in this page or a dependency. The properly secure pattern is
+// an HttpOnly, Secure, SameSite=Strict cookie set by a server-side token
+// endpoint, so the refresh token is never readable by JavaScript at all —
+// that requires a small backend (even just a proxy in front of Ford's OAuth
+// endpoints) which this static SPA doesn't have. Evaluate adding one if/when
+// this moves off "personal static-hosted dashboard" and the token becomes
+// higher-value (e.g. shared hosting, multiple users, custom domain).
+function saveRefreshToken(token, expiresInSeconds) {
+  const expiresAt = typeof expiresInSeconds === 'number'
+    ? Date.now() + expiresInSeconds * 1000
+    : Date.now() + REFRESH_MAX_AGE_MS;
+  localStorage.setItem(REFRESH_KEY, JSON.stringify({ token, expiresAt }));
+}
+
+function loadRefreshToken() {
+  const raw = localStorage.getItem(REFRESH_KEY);
+  if (!raw) return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    localStorage.removeItem(REFRESH_KEY); // stale pre-expiry format, discard
+    return null;
+  }
+
+  if (!parsed?.token || typeof parsed.expiresAt !== 'number' || Date.now() >= parsed.expiresAt) {
+    localStorage.removeItem(REFRESH_KEY);
+    return null;
+  }
+
+  return parsed.token;
+}
+
 function clearTokens() {
   accessToken = null;
   refreshToken = null;
@@ -221,7 +268,7 @@ async function refreshAccessToken() {
       const data = await resp.json();
       accessToken = data.access_token;
       refreshToken = data.refresh_token;
-      localStorage.setItem(REFRESH_KEY, refreshToken);
+      saveRefreshToken(refreshToken, data.refresh_token_expires_in);
     } catch (err) {
       logout();
       throw err;
