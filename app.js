@@ -22,7 +22,7 @@ const FORD_APPLICATION_ID = 'AFDC085B-377A-4351-B23E-5E1D35FB3700';
 // confirmed live — a direct browser fetch to its data endpoints fails
 // regardless of how valid the bearer token is. So both token exchange *and*
 // vehicle-data calls are routed through this proxy instead of straight to Ford.
-const BACKEND_BASE = 'http://localhost:8787';
+const BACKEND_BASE = 'https://lightning-rod-proxy.aporzio1.workers.dev';
 const API_BASE = `${BACKEND_BASE}/api/data`;
 const REFRESH_KEY = 'ford_refresh';
 // Fallback bound on refresh-token lifetime when Ford's token response doesn't
