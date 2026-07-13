@@ -4,3 +4,4 @@ wattsnear-site/
 __pycache__/
 .playwright-mcp/
 server/.env
+worker/.wrangler/
