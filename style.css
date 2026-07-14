@@ -372,28 +372,6 @@ button:focus-visible,
 .health-warn { background: var(--warn-soft); color: var(--warn); }
 .health-bad { background: var(--danger-soft); color: var(--danger); }
 
-/* Cell Data */
-.cell-data {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 0.5rem;
-  margin-top: 0.85rem;
-}
-
-.cell-stat {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding: 0.45rem 0.65rem;
-  background: var(--card-bg-raised);
-  border: 1px solid var(--border-soft);
-  border-radius: 6px;
-  font-size: 0.82rem;
-}
-
-.cell-label { color: var(--text-dim); }
-.cell-val { font-family: var(--font-mono); font-weight: 600; font-variant-numeric: tabular-nums; }
-.spread { color: var(--warn); }
 
 /* Collapsible Sections */
 .collapsible-section {

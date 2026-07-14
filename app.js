@@ -31,32 +31,45 @@ const REFRESH_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 let accessToken = null;
 let refreshToken = null;
 let vehicleData = {};
-let cellSpreadHistory = [];
 let refreshPromise = null;         // single-flight guard
 let vinCache = null;               // VIN doesn't change, fetch once
-let cellSpreadChart = null;
 let refs = {};                     // cached DOM lookups
 
-// Shared door label map (used by renderDoors + the top-level alert strip)
-const DOOR_LABELS = {
-  driverFrontDoor: 'Driver Front', passengerFrontDoor: 'Passenger Front',
-  driverRearDoor: 'Driver Rear', passengerRearDoor: 'Passenger Rear',
-  liftgate: 'Liftgate', hood: 'Hood', fuelDoor: 'Fuel Door'
-};
+// Real /telemetry doorStatus array entries are keyed by vehicleDoor +
+// vehicleOccupantRole (e.g. {vehicleDoor:"REAR_LEFT", vehicleOccupantRole:
+// "PASSENGER"}), confirmed live — not the simple driverFrontDoor-style keys
+// originally guessed. This maps a raw entry to a friendly label.
+function doorLabel(entry) {
+  switch (entry.vehicleDoor) {
+    case 'UNSPECIFIED_FRONT': return entry.vehicleOccupantRole === 'DRIVER' ? 'Driver Front' : 'Passenger Front';
+    case 'REAR_LEFT': return 'Rear Left';
+    case 'REAR_RIGHT': return 'Rear Right';
+    case 'TAILGATE': return 'Tailgate';
+    case 'INNER_TAILGATE': return 'Inner Tailgate';
+    default: return (entry.vehicleDoor || 'Door').replace(/_/g, ' ');
+  }
+}
 
 // Tire PSI thresholds
 const TIRE_DANGER = { low: 28, high: 48 };
 const TIRE_WARN = { low: 32, high: 44 };
 const TIRE_LABELS = { 'tire-fl': 'Front Left', 'tire-fr': 'Front Right', 'tire-rl': 'Rear Left', 'tire-rr': 'Rear Right' };
+// Real /telemetry tirePressure array is keyed by vehicleWheel, in kPa.
+const TIRE_WHEELS = { 'tire-fl': 'FRONT_LEFT', 'tire-fr': 'FRONT_RIGHT', 'tire-rl': 'REAR_LEFT', 'tire-rr': 'REAR_RIGHT' };
 
 // SOC gauge geometry — 270deg arc (see index.html transform="rotate(135 ...)")
 const SOC_ARC_LENGTH = 2 * Math.PI * 85 * 0.75; // ~400.55
 
-// Resolve a CSS custom property to its computed value — needed for contexts
-// (like Chart.js canvas rendering) that can't parse var() directly.
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
+// ===== UNIT CONVERSION =====
+// Confirmed live: /telemetry reports in metric SI regardless of the
+// account's displaySystemOfMeasure setting (temps in °C, pressure in kPa,
+// distance/speed in km — outsideTemperature of 35.5 on a summer day, and
+// tire pressures of ~260kPa/~38psi matching an F-150 placard, both confirm
+// this rather than guessing).
+const cToF = c => typeof c === 'number' ? c * 9 / 5 + 32 : undefined;
+const kpaToPsi = kpa => typeof kpa === 'number' ? kpa / 6.89476 : undefined;
+const kmToMi = km => typeof km === 'number' ? km * 0.621371 : undefined;
+const mToFt = m => typeof m === 'number' ? m * 3.28084 : undefined;
 
 // ===== INIT — single path =====
 document.addEventListener('DOMContentLoaded', () => {
@@ -72,33 +85,47 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ===== DEMO MODE — ?demo=1, bypasses OAuth entirely with mock data =====
-// Ford's FordConnect login wrapper currently rejects its own callback URL
-// (AADB2C90006, confirmed on two separate client_ids — a provisioning gap on
-// Ford's side, not fixable from here), which blocks real login. This lets the
-// rest of the app — layout, rendering, the alert strip, etc. — be exercised
-// without it. Field shapes here are the same best-effort guesses documented
-// in renderDashboard(); this doesn't confirm real API shapes, only that the
-// UI renders correctly given *a* shape roughly like this one.
+// Mock shape below mirrors a real /telemetry response captured live
+// (metrics.<name>.value nesting, kPa/°C/km units, array-based door/tire
+// entries) — see renderDashboard() for the real field mapping.
 function loadDemoData() {
   showDashboard();
   setStatus('DEMO MODE — mock data, not a live Ford connection');
   refs['vin-display'].textContent = 'DEMO-VIN-0000000';
 
+  const metric = value => ({ value });
+
   vehicleData = {
     telemetry: {
-      data: {
-        battery: {
-          stateOfCharge: 71, estimatedRange: 220, chargeStatus: 'CHARGING_AC',
-          evBatteryTotalVoltage: 398, evBatteryTemperature: 81, evChargingRateKW: 10.8,
-          evBatteryCellMinVoltage: 3.91, evBatteryCellMaxVoltage: 3.95,
-          evBatteryCellMinTemp: 77, evBatteryCellMaxTemp: 83
-        },
-        tires: { frontLeft: { pressure: 42 }, frontRight: { pressure: 30 }, rearLeft: { pressure: 43 }, rearRight: { pressure: 42 } },
-        gps: { latitude: 42.33, longitude: -83.04, altitude: 610, heading: 90, speed: 12, acceleration: { x: 0.1, y: 0, z: 1 } },
-        doors: { driverFrontDoor: 'OPEN', passengerFrontDoor: 'LOCKED', driverRearDoor: 'CLOSED', passengerRearDoor: 'CLOSED', liftgate: 'CLOSED', hood: 'CLOSED', fuelDoor: 'CLOSED' }
+      metrics: {
+        xevBatteryStateOfCharge: metric(71),
+        xevBatteryRange: metric(354), // km -> ~220mi
+        xevBatteryChargeDisplayStatus: metric('CHARGING'),
+        xevBatteryVoltage: metric(398),
+        xevBatteryTemperature: metric(27), // C -> ~81F
+        xevBatteryChargerVoltageOutput: metric(240),
+        xevBatteryChargerCurrentOutput: metric(45),
+        xevBatteryPerformanceStatus: metric('NORMAL'),
+        tirePressure: [
+          { vehicleWheel: 'FRONT_LEFT', value: 290 },
+          { vehicleWheel: 'FRONT_RIGHT', value: 207 }, // low, ~30psi
+          { vehicleWheel: 'REAR_LEFT', value: 296 },
+          { vehicleWheel: 'REAR_RIGHT', value: 290 }
+        ],
+        position: metric({ location: { lat: 42.33, lon: -83.04, alt: 186 } }),
+        heading: metric({ heading: 90 }),
+        speed: metric(19), // km/h -> ~12mph
+        acceleration: metric({ x: 0.1, y: 0, z: 1 }),
+        doorStatus: [
+          { vehicleDoor: 'UNSPECIFIED_FRONT', vehicleOccupantRole: 'DRIVER', value: 'OPEN' },
+          { vehicleDoor: 'UNSPECIFIED_FRONT', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' },
+          { vehicleDoor: 'REAR_LEFT', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' },
+          { vehicleDoor: 'REAR_RIGHT', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' },
+          { vehicleDoor: 'TAILGATE', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' }
+        ]
       }
     },
-    health: { data: { alerts: [{ severity: 'WARNING', description: 'Tire pressure low — front right' }] } },
+    health: { alerts: [{ severity: 'WARNING', description: 'Tire pressure low — front right' }] },
     wallbox: null, departureTimes: null, chargeSchedules: null,
     vin: 'DEMO-VIN-0000000',
     fetchOk: { telemetry: true, health: true, wallbox: false, departureTimes: false, chargeSchedules: false }
@@ -111,10 +138,9 @@ function cacheDom() {
   const ids = [
     'login-screen','dashboard','refresh-bar','login-btn','logout-btn',
     'connection-status','soc-circle','soc-value','range-value','charge-status',
-    'pack-voltage','battery-temp','charge-rate','vin-display',
-    'health-score','min-cell-v','max-cell-v','cell-spread','min-cell-t','max-cell-t','temp-spread',
+    'pack-voltage','battery-temp','charge-rate','vin-display','health-score',
     'lat','lon','alt','heading','speed','accel',
-    'doors-grid','health-alerts','cell-spread-chart',
+    'doors-grid','health-alerts',
     'tire-fl','tire-fr','tire-rl','tire-rr',
     'last-update','top-alerts','badge-vehicle','badge-tire','manual-token-input'
   ];
@@ -412,23 +438,19 @@ function setEl(id, text) {
 function renderDashboard() {
   const { telemetry, health, fetchOk } = vehicleData;
 
-  // NOTE ON FIELD NAMES BELOW: the FordConnect Postman collection saves no
-  // example response for /telemetry (every "response" array in the
-  // collection is empty), so this nesting and these field names are a
-  // best-effort guess at plausible shapes, not confirmed. Once you've made
-  // one real call and can see an actual payload, correct the optional-
-  // chaining paths in this function accordingly -- everything here is
-  // written to degrade to "--"/unavailable rather than throw if a guess
-  // turns out wrong.
-  const td = telemetry?.data ?? telemetry ?? {};
-  const battery = td.battery ?? td.evBattery ?? td;
-  const tires = td.tires ?? td.tirePressure ?? {};
-  const gps = td.gps ?? td.location ?? {};
-  const doors = td.doors ?? td.doorStatus ?? {};
+  // Confirmed live against a real F-150 Lightning: /telemetry returns
+  // { updateTime, vehicleId, vin, metrics: { <name>: { value, updateTime,
+  // oemCorrelationId, ... }, ... } } — a flat metrics bag, not the nested
+  // battery/tires/gps/doors groups originally guessed. m() below reads a
+  // metric's .value; units are metric SI regardless of account display
+  // settings (see UNIT CONVERSION above).
+  const metrics = telemetry?.metrics ?? {};
+  const m = name => metrics[name]?.value;
 
-  // SOC Ring
-  const soc = battery?.stateOfCharge ?? battery?.soc ?? battery?.evBatteryStateOfCharge;
-  const range = battery?.estimatedRange ?? battery?.range ?? battery?.evEstimatedRange;
+  // SOC Ring — real EV pack SoC is xevBatteryStateOfCharge; batteryStateOfCharge
+  // is the 12V auxiliary battery, a different thing entirely.
+  const soc = m('xevBatteryStateOfCharge');
+  const range = kmToMi(m('xevBatteryRange'));
   const circle = refs['soc-circle'];
   if (circle && typeof soc === 'number') {
     circle.style.strokeDashoffset = SOC_ARC_LENGTH - (soc / 100) * SOC_ARC_LENGTH;
@@ -437,8 +459,9 @@ function renderDashboard() {
   setEl('soc-value', typeof soc === 'number' ? `${Math.round(soc)}%` : '--%');
   setEl('range-value', typeof range === 'number' ? `Range: ${Math.round(range)} mi` : 'Range: -- mi');
 
-  // Charge status
-  const chargeStatus = battery?.chargeStatus ?? battery?.evChargeStatus;
+  // Charge status — xevBatteryChargeDisplayStatus is the user-facing status
+  // field; xevPlugChargerStatus (plug connected/disconnected) is a fallback.
+  const chargeStatus = m('xevBatteryChargeDisplayStatus') ?? m('xevPlugChargerStatus');
   const badge = refs['charge-status'];
   if (chargeStatus) {
     badge.textContent = chargeStatus.replace(/_/g, ' ');
@@ -455,75 +478,76 @@ function renderDashboard() {
   }
 
   // Pack overview
-  setEl('pack-voltage', fmt(battery?.evBatteryTotalVoltage ?? battery?.batteryVoltage, 0, 'V'));
-  setEl('battery-temp', fmt(battery?.evBatteryTemperature ?? battery?.batteryTemp, 0, '°F'));
-  setEl('charge-rate', fmt(battery?.evChargingRateKW ?? battery?.chargeRate, 1, 'kW'));
+  setEl('pack-voltage', fmt(m('xevBatteryVoltage'), 0, 'V'));
+  setEl('battery-temp', fmt(cToF(m('xevBatteryTemperature')), 0, '°F'));
+  const chargerV = m('xevBatteryChargerVoltageOutput');
+  const chargerA = m('xevBatteryChargerCurrentOutput');
+  const chargeRateKW = typeof chargerV === 'number' && typeof chargerA === 'number' ? (chargerV * chargerA) / 1000 : undefined;
+  setEl('charge-rate', fmt(chargeRateKW, 1, 'kW'));
 
-  // Battery health -- only render if telemetry data is present
-  if (fetchOk.telemetry) {
-    const minCV = battery?.evBatteryCellMinVoltage ?? battery?.minCellVoltage;
-    const maxCV = battery?.evBatteryCellMaxVoltage ?? battery?.maxCellVoltage;
-    const minCT = battery?.evBatteryCellMinTemp ?? battery?.minCellTemp;
-    const maxCT = battery?.evBatteryCellMaxTemp ?? battery?.maxCellTemp;
-
-    if (typeof minCV === 'number' && typeof maxCV === 'number') {
-      setEl('min-cell-v', fmt(minCV, 4, 'V'));
-      setEl('max-cell-v', fmt(maxCV, 4, 'V'));
-      setEl('cell-spread', `${((maxCV - minCV) * 1000).toFixed(1)} mV`);
-      setEl('min-cell-t', fmt(minCT, 1, '°F'));
-      setEl('max-cell-t', fmt(maxCT, 1, '°F'));
-      setEl('temp-spread', typeof minCT === 'number' && typeof maxCT === 'number'
-        ? `${(maxCT - minCT).toFixed(1)} °F`
-        : '-- °F');
-
-      const spreadMV = (maxCV - minCV) * 1000;
-      const scoreEl = refs['health-score'];
-      if (spreadMV < 30) {
-        scoreEl.textContent = 'Excellent';
-        scoreEl.className = 'health-score health-good';
-      } else if (spreadMV < 60) {
-        scoreEl.textContent = 'Fair';
-        scoreEl.className = 'health-score health-warn';
-      } else {
-        scoreEl.textContent = 'Attention Needed';
-        scoreEl.className = 'health-score health-bad';
-      }
-
-      // Cell spread chart -- store real timestamps
-      cellSpreadHistory.push({ ts: Date.now(), value: spreadMV });
-      if (cellSpreadHistory.length > 30) cellSpreadHistory.shift();
-      updateCellSpreadChart();
-    }
+  // Battery health — real per-cell voltage/temp spread isn't exposed by this
+  // API at all (confirmed: no such fields anywhere in a live payload), so the
+  // health badge uses Ford's own xevBatteryPerformanceStatus instead of a
+  // fabricated spread-based score. See index.html — the old cell-detail
+  // chart/readouts were removed since there's no real data to back them.
+  const perfStatus = m('xevBatteryPerformanceStatus');
+  const scoreEl = refs['health-score'];
+  if (perfStatus) {
+    scoreEl.textContent = perfStatus.replace(/_/g, ' ');
+    scoreEl.className = 'health-score ' + (perfStatus === 'NORMAL' ? 'health-good' : perfStatus.includes('ATTENTION') || perfStatus.includes('DEGRADED') ? 'health-bad' : 'health-warn');
   } else {
-    const scoreEl = refs['health-score'];
-    scoreEl.textContent = 'No data';
-    scoreEl.className = 'health-score health-bad';
+    scoreEl.textContent = fetchOk.telemetry ? '—' : 'No data';
+    scoreEl.className = 'health-score ' + (fetchOk.telemetry ? '' : 'health-bad');
   }
 
-  // Tires
-  const tireIssues = [
-    setTire('tire-fl', tires.frontLeft?.pressure ?? tires.FL?.pressure),
-    setTire('tire-fr', tires.frontRight?.pressure ?? tires.FR?.pressure),
-    setTire('tire-rl', tires.rearLeft?.pressure ?? tires.RL?.pressure),
-    setTire('tire-rr', tires.rearRight?.pressure ?? tires.RR?.pressure)
-  ].filter(Boolean);
+  // Tires — real tirePressure is a bare array keyed by vehicleWheel, in kPa
+  // (unlike scalar metrics, array-type metrics aren't wrapped in {value:...}
+  // — each array element carries its own value/updateTime/etc. instead).
+  const tireArray = metrics.tirePressure ?? [];
+  const tirePsi = wheel => {
+    const entry = Array.isArray(tireArray) ? tireArray.find(t => t.vehicleWheel === wheel) : null;
+    return kpaToPsi(entry?.value);
+  };
+  const tireIssues = Object.keys(TIRE_WHEELS)
+    .map(id => setTire(id, tirePsi(TIRE_WHEELS[id])))
+    .filter(Boolean);
   setBadge('badge-tire', tireIssues.length);
 
   // GPS
-  setEl('lat', gps.latitude ?? '--');
-  setEl('lon', gps.longitude ?? '--');
-  setEl('alt', gps.altitude ? `${gps.altitude} ft` : '-- ft');
-  setEl('heading', gps.heading != null ? `${gps.heading}°` : '--°');
-  setEl('speed', gps.speed != null ? `${gps.speed} mph` : '-- mph');
-  const acc = gps.acceleration;
-  setEl('accel', acc ? `${acc.x}/${acc.y}/${acc.z} g` : '--/--/-- g');
+  const position = m('position')?.location ?? {};
+  const heading = m('heading')?.heading;
+  const speedKmh = m('speed');
+  const acc = m('acceleration');
+  setEl('lat', position.lat ?? '--');
+  setEl('lon', position.lon ?? '--');
+  setEl('alt', position.alt != null ? `${Math.round(mToFt(position.alt))} ft` : '-- ft');
+  setEl('heading', heading != null ? `${Math.round(heading)}°` : '--°');
+  setEl('speed', speedKmh != null ? `${Math.round(kmToMi(speedKmh))} mph` : '-- mph');
+  setEl('accel', acc ? `${acc.x.toFixed(2)}/${acc.y.toFixed(2)}/${acc.z.toFixed(2)} g` : '--/--/-- g');
 
   // Sub-renderers (all DOM-safe)
+  const doors = normalizeDoors(metrics.doorStatus); // bare array, see tirePressure note above
   const openDoorCount = renderDoors(doors);
-  const activeAlertCount = renderAlerts(health?.data ?? health);
+  const activeAlertCount = renderAlerts(health);
 
   setBadge('badge-vehicle', openDoorCount + activeAlertCount);
-  renderTopAlerts(doors, health?.data ?? health, tireIssues);
+  renderTopAlerts(doors, health, tireIssues);
+}
+
+// Real doorStatus array entries repeat the same physical door under multiple
+// occupant-role contexts sometimes — dedupe by door+role so the grid doesn't
+// show duplicate tiles for one door.
+function normalizeDoors(doorArray) {
+  if (!Array.isArray(doorArray)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of doorArray) {
+    const key = `${entry.vehicleDoor}|${entry.vehicleOccupantRole}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ label: doorLabel(entry), status: entry.value });
+  }
+  return out;
 }
 
 // Colors a tire tile by PSI threshold and returns an issue descriptor
@@ -567,26 +591,25 @@ function setBadge(id, count) {
 
 // Builds the at-a-glance strip shown above the fold — surfaces the same
 // signals that live inside the (closed-by-default) accordions below.
-function renderTopAlerts(doorsData, healthData, tireIssues) {
+function renderTopAlerts(doors, healthData, tireIssues) {
   const strip = refs['top-alerts'];
   if (!strip) return;
   strip.replaceChildren();
 
   const items = [];
+  const alerts = healthData?.data?.alerts ?? healthData?.alerts;
 
-  if (healthData?.alerts?.length) {
-    for (const alert of healthData.alerts) {
+  if (alerts?.length) {
+    for (const alert of alerts) {
       if (alert.severity === 'CRITICAL' || alert.severity === 'WARNING') {
         items.push({ severity: alert.severity, text: alert.description || alert.code || 'Vehicle alert' });
       }
     }
   }
 
-  if (doorsData) {
-    for (const [key, label] of Object.entries(DOOR_LABELS)) {
-      if (doorsData[key] === 'OPEN') {
-        items.push({ severity: 'WARNING', text: `${label} is open` });
-      }
+  for (const door of doors) {
+    if (door.status === 'OPEN') {
+      items.push({ severity: 'WARNING', text: `${door.label} is open` });
     }
   }
 
@@ -618,35 +641,31 @@ function renderTopAlerts(doorsData, healthData, tireIssues) {
 
 // ===== SAFE HTML RENDERERS =====
 // Returns the number of open doors, for the Vehicle Status badge.
-function renderDoors(data) {
+function renderDoors(doors) {
   const grid = refs['doors-grid'];
   grid.replaceChildren();  // safer than innerHTML = ''
 
-  if (!data) { grid.textContent = ''; return 0; }
+  if (!doors.length) { grid.textContent = 'No door data available.'; return 0; }
 
-  let any = false;
   let openCount = 0;
-  for (const [key, label] of Object.entries(DOOR_LABELS)) {
-    const status = data[key];
-    if (!status) continue;
-    any = true;
+  for (const { label, status } of doors) {
     if (status === 'OPEN') openCount++;
     const div = document.createElement('div');
-    div.className = 'door-item ' + (status === 'OPEN' ? 'door-open' : status === 'CLOSED' ? 'door-closed' : 'door-locked');
+    div.className = 'door-item ' + (status === 'OPEN' ? 'door-open' : 'door-closed');
     div.appendChild(document.createTextNode(label));
     div.appendChild(document.createElement('br'));
     div.appendChild(document.createTextNode(status));
     grid.appendChild(div);
   }
 
-  if (!any) grid.textContent = 'No door data available.';
   return openCount;
 }
 
 // Returns the number of CRITICAL/WARNING alerts, for the Vehicle Status badge.
-function renderAlerts(data) {
+function renderAlerts(healthData) {
   const container = refs['health-alerts'];
   container.replaceChildren();
+  const data = { alerts: healthData?.data?.alerts ?? healthData?.alerts };
 
   if (!data?.alerts?.length) {
     const p = document.createElement('p');
@@ -682,52 +701,6 @@ function renderAlerts(data) {
   return activeCount;
 }
 
-// ===== CHART — create once, update in place =====
-function updateCellSpreadChart() {
-  const canvas = refs['cell-spread-chart'];
-  if (!canvas) return;
-
-  const labels = cellSpreadHistory.map(({ ts }) => {
-    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  });
-  const values = cellSpreadHistory.map(({ value }) => value);
-
-  if (!cellSpreadChart) {
-    const accent = cssVar('--accent');
-    const accentSoft = cssVar('--accent-soft');
-    const tickColor = cssVar('--text-dim');
-    const gridColor = cssVar('--border-soft');
-
-    cellSpreadChart = new Chart(canvas.getContext('2d'), {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [{
-          label: 'Cell Voltage Spread (mV)',
-          data: values,
-          borderColor: accent,
-          backgroundColor: accentSoft,
-          fill: true,
-          tension: 0.3,
-          pointRadius: 3
-        }]
-      },
-      options: {
-        responsive: true,
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { ticks: { color: tickColor, maxTicksLimit: 7 }, grid: { color: gridColor } },
-          y: { ticks: { color: tickColor }, grid: { color: gridColor } }
-        }
-      }
-    });
-  } else {
-    cellSpreadChart.data.labels = labels;
-    cellSpreadChart.data.datasets[0].data = values;
-    cellSpreadChart.update();
-  }
-}
-
 // ===== UI HELPERS =====
 function showLogin() {
   refs['login-screen'].classList.add('active');
@@ -748,8 +721,6 @@ function showDashboard() {
 function logout() {
   clearTokens();
   vinCache = null;
-  cellSpreadHistory = [];
-  if (cellSpreadChart) { cellSpreadChart.destroy(); cellSpreadChart = null; }
   showLogin();
 }
 

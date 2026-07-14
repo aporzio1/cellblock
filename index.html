@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CellBlock</title>
 <link rel="stylesheet" href="style.css">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="container">
@@ -98,33 +97,7 @@
         <h3>Battery Health</h3>
         <div id="health-score" class="health-score">--</div>
       </div>
-      <canvas id="cell-spread-chart" height="100"></canvas>
-      <div class="cell-data">
-        <div class="cell-stat">
-          <span class="cell-label">Min Cell Voltage</span>
-          <span id="min-cell-v" class="cell-val">-- V</span>
-        </div>
-        <div class="cell-stat">
-          <span class="cell-label">Max Cell Voltage</span>
-          <span id="max-cell-v" class="cell-val">-- V</span>
-        </div>
-        <div class="cell-stat">
-          <span class="cell-label">Cell Spread</span>
-          <span id="cell-spread" class="cell-val spread">-- mV</span>
-        </div>
-        <div class="cell-stat">
-          <span class="cell-label">Min Cell Temp</span>
-          <span id="min-cell-t" class="cell-val">-- °F</span>
-        </div>
-        <div class="cell-stat">
-          <span class="cell-label">Max Cell Temp</span>
-          <span id="max-cell-t" class="cell-val">-- °F</span>
-        </div>
-        <div class="cell-stat">
-          <span class="cell-label">Temp Spread</span>
-          <span id="temp-spread" class="cell-val spread">-- °F</span>
-        </div>
-      </div>
+      <p class="unavailable-note">Per-cell voltage/temperature detail isn't exposed by the FordConnect API — the badge above reflects Ford's own pack-level performance status instead.</p>
     </div>
 
     <!-- Collapsible Sections — ordered by priority (safety/status first) -->
