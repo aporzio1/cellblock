@@ -142,7 +142,8 @@ function cacheDom() {
     'lat','lon','alt','heading','speed','accel',
     'doors-grid','health-alerts',
     'tire-fl','tire-fr','tire-rl','tire-rr',
-    'last-update','top-alerts','badge-vehicle','badge-tire','manual-token-input'
+    'last-update','top-alerts','badge-vehicle','badge-tire','manual-token-input',
+    'vehicle-image','vehicle-image-card'
   ];
   for (const id of ids) refs[id] = document.getElementById(id);
 }
@@ -457,6 +458,7 @@ async function refreshData() {
     };
 
     renderDashboard();
+    loadVehicleImage(vinCache); // fire-and-forget, shows vehicle photo
     setStatus('Updated just now');
     setEl('last-update', `Last updated: ${new Date().toLocaleTimeString()}`);
   } catch (err) {
@@ -904,6 +906,29 @@ function renderDepartureTimes(data) {
     div.innerHTML = `<span class="info-label">${dayOfWeek}</span>
       <span class="info-value">${time}${ac !== undefined ? ' · AC: ' + (ac ? 'On' : 'Off') : ''}${enabled !== undefined ? ' · ' + (enabled ? 'Enabled' : 'Disabled') : ''}</span>`;
     container.appendChild(div);
+  }
+}
+
+// ===== VEHICLE IMAGE =====
+async function loadVehicleImage(vin) {
+  const card = refs['vehicle-image-card'];
+  const img = refs['vehicle-image'];
+  if (!card || !img || !vin) return;
+
+  try {
+    const resp = await fetch(`${API_BASE}/vehicle-image?vin=${vin}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'image/jpeg,image/png,image/webp,*/*' }
+    });
+    if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    img.src = url;
+    card.style.display = '';
+    // Clean up old object URL on next load
+    img.onload = () => { if (img._prevUrl) URL.revokeObjectURL(img._prevUrl); img._prevUrl = url; };
+  } catch (err) {
+    console.warn('[vehicle-image]', err.message || err);
+    card.style.display = 'none';
   }
 }
 

@@ -37,7 +37,7 @@
 
   <!-- Dashboard -->
   <div id="dashboard" class="screen">
-    <!-- Top Row: SoC + Status -->
+    <!-- Top Row: SoC + Vehicle Image + Status -->
     <div class="top-row">
       <div class="card soc-card">
         <div class="soc-ring-container">
@@ -66,6 +66,11 @@
           <div id="charge-status" class="charge-badge">—</div>
           <div id="last-update" class="last-update">Last updated: --</div>
         </div>
+      </div>
+
+      <!-- Vehicle Image -->
+      <div class="card vehicle-image-card" id="vehicle-image-card" style="display:none;">
+        <img id="vehicle-image" class="vehicle-photo" alt="Your F-150 Lightning">
       </div>
 
       <!-- Quick Stats -->
