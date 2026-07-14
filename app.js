@@ -371,12 +371,17 @@ async function refreshData() {
 
     refs['vin-display'].textContent = vinCache;
 
-    // wallbox/departure-times/charge-schedules are fetched for completeness
-    // (fetchOk tracking) but not wired into any UI section yet — follow-up
-    // work once their real response shapes are confirmed.
-    const [telemetry, health, wallbox, departureTimes, chargeSchedules] = await Promise.all([
+    // Stagger API calls to avoid Ford's aggressive rate limits — fire
+    // telemetry+health first (most critical), then wallbox+departure+charge
+    // with small delays between each. All still run concurrently within
+    // their groups; the stagger only separates the groups.
+    const [telemetry, health] = await Promise.all([
       apiCall(`/telemetry?vin=${vinCache}`).catch(() => null),
-      apiCall(`/vehicle-health/alerts?vin=${vinCache}`).catch(() => null),
+      apiCall(`/vehicle-health/alerts?vin=${vinCache}`).catch(() => null)
+    ]);
+    // Small delay before secondary calls to respect rate limits
+    await new Promise(r => setTimeout(r, 500));
+    const [wallbox, departureTimes, chargeSchedules] = await Promise.all([
       apiCall(`/wallbox?vin=${vinCache}`).catch(() => null),
       apiCall(`/electric/departure-times?vin=${vinCache}`).catch(() => null),
       apiCall(`/electric/charge-schedules?vin=${vinCache}`).catch(() => null)
