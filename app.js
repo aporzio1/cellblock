@@ -7,15 +7,12 @@
 // before were invented and don't exist in the real API.
 const CLIENT_ID = 'd98bc150-b7d4-476c-98ce-10951345caf6';
 const REDIRECT_URI = window.location.origin + window.location.pathname;
-// The raw Azure B2C authorize endpoint (api.vehicle.ford.com/.../oauth2/v2.0/authorize)
-// is NOT the real entry point — hitting it directly skips Ford's login UI
-// entirely and fails deep in the B2C policy (AADB2C90075, RESTApiCallForUserInfo,
-// step 3) because the policy expects session context that only Ford's own
-// login wrapper below supplies. Confirmed against Ford's published FordConnect
-// docs and community implementations (evcc, ford-connect-sim). application_id
-// is a published constant, same for every developer — not specific to this app.
-const FORD_AUTHORIZE_URL = 'https://fordconnect.cv.ford.com/common/login/';
-const FORD_APPLICATION_ID = 'AFDC085B-377A-4351-B23E-5E1D35FB3700';
+// Confirmed straight from Ford's own FCON2.0-Documentation PDF (sent by Ford
+// support, 2026-05-13) — this is the actual account-linking init endpoint,
+// distinct from both the raw Azure B2C authorize URL and the FordPass
+// consumer common/login wrapper (both of which we tried first, based on
+// third-party sources, and both of which were wrong for FordConnect 2.0).
+const FORD_AUTHORIZE_URL = 'https://api.vehicle.ford.com/fcon-public/v1/auth/init';
 // Backend proxy — see server/. Handles two things a browser can't do itself:
 // (1) FordConnect's token endpoint requires a client_secret, which can never
 // live in browser JS; (2) api.vehicle.ford.com sends no CORS headers at all,
@@ -143,13 +140,9 @@ function startLogin() {
   sessionStorage.setItem('auth_state', state);
 
   const url = new URL(FORD_AUTHORIZE_URL);
-  url.searchParams.set('make', 'F');
-  url.searchParams.set('application_id', FORD_APPLICATION_ID);
   url.searchParams.set('client_id', CLIENT_ID);
-  url.searchParams.set('response_type', 'code');
   url.searchParams.set('state', state);
   url.searchParams.set('redirect_uri', REDIRECT_URI);
-  url.searchParams.set('scope', 'access');
 
   window.location.href = url.toString();
 }
