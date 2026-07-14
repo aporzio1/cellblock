@@ -94,10 +94,10 @@ export default {
       if (request.method === 'GET' && url.pathname.startsWith(DATA_PREFIX)) {
         const suffix = url.pathname.slice(DATA_PREFIX.length) + url.search;
         const auth = request.headers.get('authorization');
-        if (!auth) return json(env, request, 401, { error: 'Authorization header is required' });
+        if (!auth) return json(env, 401, { error: 'Authorization header is required' });
 
         const fordResp = await fetch(`${FORD_DATA_BASE}/${suffix}`, {
-          headers: { Authorization: auth, Accept: 'application/json' }
+          headers: { Authorization: auth, 'Accept': 'application/json' }
         });
         const body = await fordResp.text();
         return new Response(body, {
