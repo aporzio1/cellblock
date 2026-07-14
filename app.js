@@ -350,12 +350,16 @@ async function refreshAccessToken() {
 }
 
 // ===== DATA FETCHING =====
+let isRefreshing = false;
+
 async function refreshData() {
+  if (isRefreshing) return; // Prevent double-refreshes
   if (new URLSearchParams(window.location.search).has('demo')) {
     loadDemoData(); // re-render mock data instead of hitting the real API
     return;
   }
 
+  isRefreshing = true;
   setStatus('Updating...');
   toggleLoading(true);
 
@@ -375,16 +379,16 @@ async function refreshData() {
     // telemetry+health first (most critical), then wallbox, departure-times,
     // and charge-schedules sequentially with delays between each.
     const [telemetry, health] = await Promise.all([
-      apiCall(`/telemetry?vin=${vinCache}`).catch(() => null),
-      apiCall(`/vehicle-health/alerts?vin=${vinCache}`).catch(() => null)
+      apiCall(`/telemetry?vin=${vinCache}`).catch((err) => { console.warn('[telemetry]', err.message || err); return null; }),
+      apiCall(`/vehicle-health/alerts?vin=${vinCache}`).catch((err) => { console.warn('[health]', err.message || err); return null; })
     ]);
     // Wait before secondary calls to respect rate limits
     await new Promise(r => setTimeout(r, 2000));
-    const wallbox = await apiCall(`/wallbox?vin=${vinCache}`).catch(() => null);
+    const wallbox = await apiCall(`/wallbox?vin=${vinCache}`).catch((err) => { console.warn('[wallbox]', err.message || err); return null; });
     await new Promise(r => setTimeout(r, 1000));
-    const departureTimes = await apiCall(`/electric/departure-times?vin=${vinCache}`).catch(() => null);
+    const departureTimes = await apiCall(`/electric/departure-times?vin=${vinCache}`).catch((err) => { console.warn('[departure]', err.message || err); return null; });
     await new Promise(r => setTimeout(r, 1000));
-    const chargeSchedules = await apiCall(`/electric/charge-schedules?vin=${vinCache}`).catch(() => null);
+    const chargeSchedules = await apiCall(`/electric/charge-schedules?vin=${vinCache}`).catch((err) => { console.warn('[chargeschedule]', err.message || err); return null; });
 
     vehicleData = {
       telemetry, health, wallbox, departureTimes, chargeSchedules,
@@ -403,6 +407,7 @@ async function refreshData() {
     setStatus('Error loading data');
   } finally {
     toggleLoading(false);
+    isRefreshing = false;
   }
 }
 
