@@ -441,7 +441,7 @@ function setEl(id, text) {
 
 // ===== RENDERING =====
 function renderDashboard() {
-  const { telemetry, health, fetchOk } = vehicleData;
+  const { telemetry, health, fetchOk, wallbox, departureTimes, chargeSchedules } = vehicleData;
 
   // Confirmed live against a real F-150 Lightning: /telemetry returns
   // { updateTime, vehicleId, vin, metrics: { <name>: { value, updateTime,
