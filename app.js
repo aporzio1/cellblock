@@ -350,6 +350,37 @@ async function refreshAccessToken() {
 }
 
 // ===== DATA FETCHING =====
+// Cache last successful response per endpoint (sessionStorage, 5 min TTL)
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_KEY = 'cellblock_cache';
+
+function loadCache() {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== 'object') return {};
+    return parsed;
+  } catch { return {}; }
+}
+
+function saveToCache(key, data) {
+  const cache = loadCache();
+  cache[key] = { data, ts: Date.now() };
+  try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch {}
+}
+
+function getFromCache(key) {
+  const cache = loadCache();
+  const entry = cache[key];
+  if (!entry || Date.now() - entry.ts > CACHE_TTL_MS) return null;
+  return entry.data;
+}
+
+function clearCache() {
+  try { sessionStorage.removeItem(CACHE_KEY); } catch {}
+}
+
 let isRefreshing = false;
 
 async function refreshData() {
@@ -375,20 +406,46 @@ async function refreshData() {
 
     refs['vin-display'].textContent = vinCache;
 
-    // Stagger API calls to avoid Ford's aggressive rate limits — fire
-    // telemetry+health first (most critical), then wallbox, departure-times,
-    // and charge-schedules sequentially with delays between each.
-    const [telemetry, health] = await Promise.all([
-      apiCall(`/telemetry?vin=${vinCache}`).catch((err) => { console.warn('[telemetry]', err.message || err); return null; }),
-      apiCall(`/vehicle-health/alerts?vin=${vinCache}`).catch((err) => { console.warn('[health]', err.message || err); return null; })
-    ]);
-    // Wait before secondary calls to respect rate limits
-    await new Promise(r => setTimeout(r, 2000));
-    const wallbox = await apiCall(`/wallbox?vin=${vinCache}`).catch((err) => { console.warn('[wallbox]', err.message || err); return null; });
-    await new Promise(r => setTimeout(r, 1000));
-    const departureTimes = await apiCall(`/electric/departure-times?vin=${vinCache}`).catch((err) => { console.warn('[departure]', err.message || err); return null; });
-    await new Promise(r => setTimeout(r, 1000));
-    const chargeSchedules = await apiCall(`/electric/charge-schedules?vin=${vinCache}`).catch((err) => { console.warn('[chargeschedule]', err.message || err); return null; });
+    // Fetch telemetry+health (critical), fall back to cache on failure
+    let telemetry = getFromCache('telemetry');
+    let health = getFromCache('health');
+    if (!telemetry || !health) {
+      try {
+        const [t, h] = await Promise.all([
+          apiCall(`/telemetry?vin=${vinCache}`),
+          apiCall(`/vehicle-health/alerts?vin=${vinCache}`)
+        ]);
+        telemetry = t; health = h;
+        if (telemetry) saveToCache('telemetry', telemetry);
+        if (health) saveToCache('health', health);
+      } catch (err) {
+        console.warn('[refresh] primary calls failed:', err.message || err);
+        if (!telemetry && !health) setStatus('Rate limited — showing cached data');
+      }
+    }
+
+    // Secondary calls (wallbox/departure/charge) only attempt if caches are empty
+    let wallbox = getFromCache('wallbox');
+    let departureTimes = getFromCache('departureTimes');
+    let chargeSchedules = getFromCache('chargeSchedules');
+    if (!wallbox || !departureTimes || !chargeSchedules) {
+      // Brief delay before secondary calls
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        wallbox = await apiCall(`/wallbox?vin=${vinCache}`);
+        if (wallbox) saveToCache('wallbox', wallbox);
+      } catch (err) { console.warn('[wallbox]', err.message || err); }
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        departureTimes = await apiCall(`/electric/departure-times?vin=${vinCache}`);
+        if (departureTimes) saveToCache('departureTimes', departureTimes);
+      } catch (err) { console.warn('[departure]', err.message || err); }
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        chargeSchedules = await apiCall(`/electric/charge-schedules?vin=${vinCache}`);
+        if (chargeSchedules) saveToCache('chargeSchedules', chargeSchedules);
+      } catch (err) { console.warn('[chargeschedule]', err.message || err); }
+    }
 
     vehicleData = {
       telemetry, health, wallbox, departureTimes, chargeSchedules,
