@@ -319,6 +319,9 @@ button:focus-visible,
 .top-alerts .alert-item { margin-bottom: 0; }
 
 /* Quick Stats */
+.quick-stats {
+  grid-column: 1 / -1;
+}
 .stat-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
