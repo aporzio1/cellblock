@@ -971,8 +971,9 @@ async function loadVehicleImage(vin) {
     throw new Error('Empty image response');
   } catch (err) {
     console.warn('[vehicle-image]', err.message || err);
-    // Fallback to local generic image
-    img.src = 'images/lightning.svg';
+    // Fallback: detect model from VIN, show appropriate generic image
+    const model = vin.startsWith('1FT') ? 'lightning' : vin.startsWith('3FM') ? 'mache' : 'ev';
+    img.src = `images/${model}.svg`;
     card.style.display = '';
   }
 }
