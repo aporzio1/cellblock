@@ -593,16 +593,26 @@ function renderDashboard() {
   const timeToFull = m('xevBatteryTimeToFullCharge');
   setEl('time-to-full', typeof timeToFull === 'number' && timeToFull > 0 ? `${Math.round(timeToFull)} min` : '-- min');
 
-  // Battery health — real per-cell voltage/temp spread isn't exposed by this
-  // API at all (confirmed: no such fields anywhere in a live payload), so the
-  // health badge uses Ford's own xevBatteryPerformanceStatus instead of a
-  // fabricated spread-based score. See index.html — the old cell-detail
-  // chart/readouts were removed since there's no real data to back them.
+  // Battery health — use Ford's own xevBatteryPerformanceStatus plus a
+  // calculated percentage based on known design capacity. Ford's published
+  // Lightning extended-range pack is ~141 kWh total (131 kWh usable);
+  // standard-range is ~98 kWh usable. The reported xevBatteryCapacity tells
+  // us which pack it is, and the ratio vs design capacity estimates degradation.
   const perfStatus = m('xevBatteryPerformanceStatus');
+  const capacity = m('xevBatteryCapacity');
+  // Extended range ~141 kWh total, standard range ~98 kWh usable (~105 total est)
+  const designCapacity = typeof capacity === 'number' && capacity > 110 ? 141 : 105;
+  const healthPct = typeof capacity === 'number' && capacity > 0
+    ? Math.min(100, Math.round((capacity / designCapacity) * 100))
+    : null;
   const scoreEl = refs['health-score'];
-  if (perfStatus) {
-    scoreEl.textContent = perfStatus.replace(/_/g, ' ');
-    scoreEl.className = 'health-score ' + (perfStatus === 'NORMAL' ? 'health-good' : perfStatus.includes('ATTENTION') || perfStatus.includes('DEGRADED') ? 'health-bad' : 'health-warn');
+  if (perfStatus || healthPct) {
+    const parts = [];
+    if (perfStatus) parts.push(perfStatus.replace(/_/g, ' '));
+    if (healthPct) parts.push(`${healthPct}%`);
+    scoreEl.textContent = parts.join(' · ') || '—';
+    const isGood = perfStatus === 'NORMAL' && (healthPct === null || healthPct >= 95);
+    scoreEl.className = 'health-score ' + (isGood ? 'health-good' : 'health-warn');
   } else {
     scoreEl.textContent = fetchOk.telemetry ? '—' : 'No data';
     scoreEl.className = 'health-score ' + (fetchOk.telemetry ? '' : 'health-bad');
