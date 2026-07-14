@@ -667,3 +667,30 @@ button:focus-visible,
   object-fit: contain;
   border-radius: 8px;
 }
+
+/* Vehicle info grid (gear, ignition) */
+.vehicle-info-grid {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem;
+  background: var(--card-bg-raised);
+  border-radius: 6px;
+}
+.vehicle-info-grid .info-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.6rem;
+}
+.vehicle-info-grid .info-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.vehicle-info-grid .info-value {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--text);
+}

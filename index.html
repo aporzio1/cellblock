@@ -105,6 +105,10 @@
             <span class="stat-label">Outside Temp</span>
             <span id="outside-temp" class="stat-value">-- °F</span>
           </div>
+          <div class="stat-item">
+            <span class="stat-label">Time to Full</span>
+            <span id="time-to-full" class="stat-value">-- min</span>
+          </div>
         </div>
       </div>
     </div>
@@ -129,6 +133,16 @@
         <span class="toggle-arrow" aria-hidden="true">▴</span>
       </button>
       <div class="collapse-content open" id="content-vehicle">
+        <div class="vehicle-info-grid" id="vehicle-info-grid">
+          <div class="info-row">
+            <span class="info-label">Gear</span>
+            <span id="gear-position" class="info-value">--</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Ignition</span>
+            <span id="ignition-status" class="info-value">--</span>
+          </div>
+        </div>
         <div class="doors-grid" id="doors-grid"></div>
         <div class="health-alerts" id="health-alerts"></div>
       </div>

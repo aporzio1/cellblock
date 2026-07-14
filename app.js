@@ -112,6 +112,7 @@ function loadDemoData() {
         odometer: metric(15600),
         outsideTemperature: metric(35.5),
         xevPlugChargerStatus: metric('DISCONNECTED'),
+        xevBatteryTimeToFullCharge: metric(0),
         gearLeverPosition: metric('PARK'),
         ignitionStatus: metric('OFF'),
         alarmStatus: metric('DISARMED'),
@@ -161,7 +162,8 @@ function cacheDom() {
     'tire-fl','tire-fr','tire-rl','tire-rr',
     'last-update','top-alerts','badge-vehicle','badge-tire','manual-token-input',
     'vehicle-image','vehicle-image-card',
-    'battery-capacity','energy-remaining','odometer-display','outside-temp'
+    'battery-capacity','energy-remaining','odometer-display','outside-temp',
+    'time-to-full','gear-position','ignition-status'
   ];
   for (const id of ids) refs[id] = document.getElementById(id);
 }
@@ -588,6 +590,8 @@ function renderDashboard() {
   setEl('energy-remaining', fmt(m('xevBatteryEnergyRemaining'), 1, 'kWh'));
   setEl('odometer-display', fmt(kmToMi(m('odometer')), 0, 'mi'));
   setEl('outside-temp', fmt(cToF(m('outsideTemperature')), 0, '°F'));
+  const timeToFull = m('xevBatteryTimeToFullCharge');
+  setEl('time-to-full', typeof timeToFull === 'number' && timeToFull > 0 ? `${Math.round(timeToFull)} min` : '-- min');
 
   // Battery health — real per-cell voltage/temp spread isn't exposed by this
   // API at all (confirmed: no such fields anywhere in a live payload), so the
@@ -636,6 +640,10 @@ function renderDashboard() {
 
   setBadge('badge-vehicle', openDoorCount + activeAlertCount);
   renderTopAlerts(doors, health, tireIssues);
+
+  // Vehicle info
+  setEl('gear-position', m('gearLeverPosition')?.replace(/_/g, ' ') ?? '--');
+  setEl('ignition-status', m('ignitionStatus')?.replace(/_/g, ' ') ?? '--');
 
   // Wallbox / charger status
   renderWallbox(wallbox);
