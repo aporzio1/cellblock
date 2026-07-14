@@ -1,0 +1,17 @@
+To: Ford Developer Program Support
+Subject: FordConnect API — rate limiting clarification
+
+I'm developing a telemetry dashboard using the FordConnect 2.0 API (FCON2.0) for personal vehicle monitoring. I'm consistently receiving HTTP 429 (Too Many Requests) responses across all endpoints — `/fcon-query/v1/telemetry`, `/fcon-query/v1/vehicle-health/alerts`, `/fcon-query/v1/wallbox`, `/electric/departure-times`, `/electric/charge-schedules`, and the `/garage` endpoint.
+
+Could you share the specific rate limit details for the FordConnect API? Specifically:
+
+1. What are the per-endpoint or per-account request quotas (requests per minute / hour / day)?
+2. How long does the rate limit window last before it resets?
+3. Is there a way to request a higher rate limit or a dedicated tier for active development?
+4. Are there any recommended practices to avoid hitting these limits (e.g., caching headers, etags, batch endpoints)?
+
+Appreciate any guidance. Happy to provide my client ID and account details if that helps.
+
+Thanks,
+Andrew Porzio
+aporzio1@me.com

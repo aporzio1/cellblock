@@ -98,34 +98,51 @@ function loadDemoData() {
   vehicleData = {
     telemetry: {
       metrics: {
-        xevBatteryStateOfCharge: metric(71),
-        xevBatteryRange: metric(354), // km -> ~220mi
-        xevBatteryChargeDisplayStatus: metric('CHARGING'),
-        xevBatteryVoltage: metric(398),
-        xevBatteryTemperature: metric(27), // C -> ~81F
-        xevBatteryChargerVoltageOutput: metric(240),
-        xevBatteryChargerCurrentOutput: metric(45),
+        xevBatteryStateOfCharge: metric(100),
+        xevBatteryRange: metric(457.8),
+        xevBatteryChargeDisplayStatus: metric('NOT_READY'),
+        xevBatteryVoltage: metric(391.5),
+        xevBatteryTemperature: metric(30),
+        xevBatteryChargerVoltageOutput: metric(4),
+        xevBatteryChargerCurrentOutput: metric(0.1),
         xevBatteryPerformanceStatus: metric('NORMAL'),
+        xevBatteryCapacity: metric(141.7),
+        xevBatteryEnergyRemaining: metric(135.15),
+        xevBatteryActualStateOfCharge: metric(95.83),
+        odometer: metric(15600),
+        outsideTemperature: metric(35.5),
+        xevPlugChargerStatus: metric('DISCONNECTED'),
+        gearLeverPosition: metric('PARK'),
+        ignitionStatus: metric('OFF'),
+        alarmStatus: metric('DISARMED'),
+        hoodStatus: metric('CLOSED'),
         tirePressure: [
-          { vehicleWheel: 'FRONT_LEFT', value: 290 },
-          { vehicleWheel: 'FRONT_RIGHT', value: 207 }, // low, ~30psi
-          { vehicleWheel: 'REAR_LEFT', value: 296 },
-          { vehicleWheel: 'REAR_RIGHT', value: 290 }
+          { vehicleWheel: 'FRONT_LEFT', value: 262 },
+          { vehicleWheel: 'FRONT_RIGHT', value: 264 },
+          { vehicleWheel: 'REAR_LEFT', value: 252 },
+          { vehicleWheel: 'REAR_RIGHT', value: 274 }
         ],
-        position: metric({ location: { lat: 42.33, lon: -83.04, alt: 186 } }),
-        heading: metric({ heading: 90 }),
-        speed: metric(19), // km/h -> ~12mph
-        acceleration: metric({ x: 0.1, y: 0, z: 1 }),
+        tirePressureStatus: [
+          { vehicleWheel: 'FRONT_LEFT', value: 'NORMAL' },
+          { vehicleWheel: 'FRONT_RIGHT', value: 'NORMAL' },
+          { vehicleWheel: 'REAR_LEFT', value: 'NORMAL' },
+          { vehicleWheel: 'REAR_RIGHT', value: 'NORMAL' }
+        ],
+        position: metric({ location: { lat: 42.999, lon: -83.781, alt: 240 } }),
+        heading: metric({ heading: 85 }),
+        speed: metric(0),
+        acceleration: metric({ x: -0.015, y: 0.16, z: 0 }),
         doorStatus: [
-          { vehicleDoor: 'UNSPECIFIED_FRONT', vehicleOccupantRole: 'DRIVER', value: 'OPEN' },
-          { vehicleDoor: 'UNSPECIFIED_FRONT', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' },
+          { vehicleDoor: 'UNSPECIFIED_FRONT', vehicleOccupantRole: 'DRIVER', value: 'CLOSED' },
           { vehicleDoor: 'REAR_LEFT', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' },
+          { vehicleDoor: 'UNSPECIFIED_FRONT', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' },
           { vehicleDoor: 'REAR_RIGHT', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' },
-          { vehicleDoor: 'TAILGATE', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' }
+          { vehicleDoor: 'TAILGATE', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' },
+          { vehicleDoor: 'INNER_TAILGATE', vehicleOccupantRole: 'PASSENGER', value: 'CLOSED' }
         ]
       }
     },
-    health: { VehicleAlertList: [{ Vin: 'DEMO-VIN-0000000', ActiveAlerts: [{ Severity: 'WARNING', AlertDescription: 'Tire pressure low — front right' }] }] },
+    health: { VehicleAlertList: [{ Vin: 'DEMO-VIN-0000000', ActiveAlerts: [], StatusCode: 200, StatusDesc: 'OK' }] },
     wallbox: null, departureTimes: null, chargeSchedules: null,
     vin: 'DEMO-VIN-0000000',
     fetchOk: { telemetry: true, health: true, wallbox: false, departureTimes: false, chargeSchedules: false }
@@ -143,7 +160,8 @@ function cacheDom() {
     'doors-grid','health-alerts',
     'tire-fl','tire-fr','tire-rl','tire-rr',
     'last-update','top-alerts','badge-vehicle','badge-tire','manual-token-input',
-    'vehicle-image','vehicle-image-card'
+    'vehicle-image','vehicle-image-card',
+    'battery-capacity','energy-remaining','odometer-display','outside-temp'
   ];
   for (const id of ids) refs[id] = document.getElementById(id);
 }
@@ -552,6 +570,10 @@ function renderDashboard() {
   const chargerA = m('xevBatteryChargerCurrentOutput');
   const chargeRateKW = typeof chargerV === 'number' && typeof chargerA === 'number' ? (chargerV * chargerA) / 1000 : undefined;
   setEl('charge-rate', fmt(chargeRateKW, 1, 'kW'));
+  setEl('battery-capacity', fmt(m('xevBatteryCapacity'), 1, 'kWh'));
+  setEl('energy-remaining', fmt(m('xevBatteryEnergyRemaining'), 1, 'kWh'));
+  setEl('odometer-display', fmt(kmToMi(m('odometer')), 0, 'mi'));
+  setEl('outside-temp', fmt(cToF(m('outsideTemperature')), 0, '°F'));
 
   // Battery health — real per-cell voltage/temp spread isn't exposed by this
   // API at all (confirmed: no such fields anywhere in a live payload), so the
