@@ -568,10 +568,6 @@ function renderDashboard() {
   const chargeStatus = m('xevBatteryChargeDisplayStatus') ?? m('xevPlugChargerStatus');
   const badge = refs['charge-status'];
   if (chargeStatus) {
-    badge.textContent = chargeStatus.replace(/_/g, ' ');
-    badge.style.background = chargeStatus.includes('CHARGING') ? 'var(--good-soft)' : 'var(--info-soft)';
-    badge.style.color = chargeStatus.includes('CHARGING') ? 'var(--good)' : 'var(--info)';
-    // Tooltip explaining charge status
     const TOOLTIPS = {
       CHARGING: 'Vehicle is actively charging',
       NOT_READY: 'Battery full or unplugged — not in a charge-ready state',
@@ -581,7 +577,35 @@ function renderDashboard() {
       ERROR: 'Charging system fault detected',
     };
     const key = chargeStatus.toUpperCase().replace(/ /g, '_');
-    badge.title = TOOLTIPS[key] ?? `Charge status: ${chargeStatus.replace(/_/g, ' ')}`;
+    const desc = TOOLTIPS[key] ?? `Charge status: ${chargeStatus.replace(/_/g, ' ')}`;
+
+    // Build badge with info icon + popup
+    badge.replaceChildren();
+    const text = document.createElement('span');
+    text.textContent = chargeStatus.replace(/_/g, ' ');
+    const info = document.createElement('span');
+    info.textContent = 'ⓘ';
+    info.className = 'charge-info-icon';
+    info.setAttribute('tabindex', '0');
+    info.setAttribute('role', 'button');
+    info.setAttribute('aria-label', desc);
+    const popup = document.createElement('div');
+    popup.className = 'charge-popup';
+    popup.textContent = desc;
+    popup.style.display = 'none';
+    info.onclick = (e) => {
+      e.stopPropagation();
+      const isVisible = popup.style.display !== 'none';
+      document.querySelectorAll('.charge-popup').forEach(p => p.style.display = 'none');
+      popup.style.display = isVisible ? 'none' : 'block';
+    };
+    info.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); info.click(); } };
+    document.addEventListener('click', () => popup.style.display = 'none');
+    badge.appendChild(text);
+    badge.appendChild(info);
+    badge.appendChild(popup);
+    badge.style.background = chargeStatus.includes('CHARGING') ? 'var(--good-soft)' : 'var(--info-soft)';
+    badge.style.color = chargeStatus.includes('CHARGING') ? 'var(--good)' : 'var(--info)';
   } else if (!fetchOk.telemetry) {
     badge.textContent = 'Data unavailable';
     badge.style.background = 'var(--danger-soft)';

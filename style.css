@@ -693,3 +693,31 @@ button:focus-visible,
   font-size: 0.9rem;
   color: var(--text);
 }
+
+/* Charge status info icon & popup */
+.charge-info-icon {
+  cursor: pointer;
+  font-size: 0.75rem;
+  margin-left: 0.3rem;
+  opacity: 0.7;
+  position: relative;
+  top: -0.1em;
+}
+.charge-info-icon:hover { opacity: 1; }
+.charge-popup {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 6px;
+  background: var(--card-bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  z-index: 10;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.charge-badge { position: relative; }
