@@ -841,13 +841,13 @@ function renderWallbox(data) {
   container.replaceChildren();
 
   if (!data) {
-    container.innerHTML = '<p class="unavailable-note">No wallbox data available.</p>';
+    container.innerHTML = '<p class="unavailable-note">No wallbox configured.</p>';
     return;
   }
 
   // Expected shape: { wallbox: [{ wallboxId, status, ... }] } or flat object
   const wb = Array.isArray(data.wallbox) ? data.wallbox[0] : data;
-  if (!wb) { container.innerHTML = '<p class="unavailable-note">No wallbox data available.</p>'; return; }
+  if (!wb) { container.innerHTML = '<p class="unavailable-note">No wallbox configured.</p>'; return; }
 
   const fields = [
     ['Status', wb.status ?? wb.Status ?? '--'],
@@ -881,7 +881,7 @@ function renderChargeSchedules(data) {
   container.replaceChildren();
 
   if (!data) {
-    container.innerHTML = '<p class="unavailable-note">No charge schedule data available.</p>';
+    container.innerHTML = '<p class="unavailable-note">No charge schedules configured.</p>';
     return;
   }
 
@@ -917,7 +917,7 @@ function renderDepartureTimes(data) {
   container.replaceChildren();
 
   if (!data) {
-    container.innerHTML = '<p class="unavailable-note">No departure time data available.</p>';
+    container.innerHTML = '<p class="unavailable-note">No departure times configured.</p>';
     return;
   }
 
