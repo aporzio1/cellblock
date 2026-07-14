@@ -19,7 +19,7 @@ const FORD_AUTHORIZE_URL = 'https://api.vehicle.ford.com/fcon-public/v1/auth/ini
 // confirmed live — a direct browser fetch to its data endpoints fails
 // regardless of how valid the bearer token is. So both token exchange *and*
 // vehicle-data calls are routed through this proxy instead of straight to Ford.
-const BACKEND_BASE = 'https://lightning-rod-proxy.aporzio1.workers.dev';
+const BACKEND_BASE = 'https://cellblock-proxy.aporzio1.workers.dev';
 const API_BASE = `${BACKEND_BASE}/api/data`;
 const REFRESH_KEY = 'ford_refresh';
 // Fallback bound on refresh-token lifetime when Ford's token response doesn't
