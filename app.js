@@ -939,15 +939,26 @@ async function loadVehicleImage(vin) {
 
   try {
     const resp = await fetch(`${API_BASE}/vehicle-image?vin=${vin}`, {
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'image/jpeg,image/png,image/webp,*/*' }
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'image/jpeg,image/png,image/webp,application/json,*/*' }
     });
     if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`);
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    img.src = url;
-    card.style.display = '';
-    // Clean up old object URL on next load
-    img.onload = () => { if (img._prevUrl) URL.revokeObjectURL(img._prevUrl); img._prevUrl = url; };
+    const contentType = resp.headers.get('content-type') || '';
+
+    if (contentType.includes('json') || contentType === '') {
+      // Ford returns JSON with an image URL, not the image itself
+      const data = await resp.json();
+      const url = data.vehicleImage || data.imageUrl || data.url;
+      if (!url) throw new Error('No image URL in response');
+      img.src = url;
+      card.style.display = '';
+    } else {
+      // Direct image blob (unlikely but handle it)
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      img.src = url;
+      card.style.display = '';
+      img.onload = () => { if (img._prevUrl) URL.revokeObjectURL(img._prevUrl); img._prevUrl = url; };
+    }
   } catch (err) {
     console.warn('[vehicle-image]', err.message || err);
     card.style.display = 'none';
