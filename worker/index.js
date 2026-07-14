@@ -173,7 +173,7 @@ export default {
 
       return json(env, request, 404, { error: 'Not found' });
     } catch (err) {
-      return json(env, request, 502, { error: 'Proxy request failed', detail: String(err) });
+      return json(env, request, 502, { error: 'Proxy request failed' });
     }
   }
 };

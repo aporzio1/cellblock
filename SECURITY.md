@@ -34,6 +34,13 @@ The proxy is deployed as a Cloudflare Worker (`cellblock-proxy`) at
 
 ## Threat model & future work
 
+**Current risk:** A stolen refresh token gives an attacker real-time access to
+the vehicle's GPS position (lat/lon/heading/speed), door state, tire
+pressure, battery level, and VIN. Ford's `/fcon-query/v1/*` endpoints are
+READ-ONLY telemetry — an attacker cannot unlock, start, or control the
+vehicle — but the surveillance capability (knowing where the owner's truck
+is in real time) is real.
+
 The properly secure pattern would be the proxy setting the refresh token as
 an **HttpOnly, Secure, SameSite=Strict cookie** so JavaScript never touches
 it at all. This would require:
@@ -48,10 +55,15 @@ This hasn't been implemented yet because:
 
 - The FordConnect API's auth flow is already complex (Azure AD B2C, custom
   redirect handling, the `/auth/init` wrapper endpoint) and adding cookie
-  management would significantly increase surface area
+  management would increase surface area
 - The current localStorage approach is the same threat model as every other
   SPA OAuth integration (GitHub, Google, etc.) — the primary risk is XSS,
   which would compromise the app regardless of auth token location
+
+**Status:** CellBlock is now live on a public domain (cellblock.cc) with
+real vehicle data. The HttpOnly cookie upgrade is the single highest-leverage
+security improvement available — worth prioritizing if usage expands beyond
+the owner.
 
 ## Data accuracy
 
