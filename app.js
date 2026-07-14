@@ -170,7 +170,14 @@ function loadSession() {
   refreshToken = loadRefreshToken();
   if (refreshToken) {
     showDashboard();
-    refreshData();
+    setStatus('Restoring session...');
+    // Proactively refresh the access token before making data calls
+    refreshAccessToken().then(() => {
+      refreshData();
+    }).catch(() => {
+      // refreshAccessToken already calls logout() on failure
+      // which shows the login screen — no action needed here
+    });
   } else {
     showLogin();
   }
@@ -351,13 +358,20 @@ async function refreshAccessToken() {
         body: JSON.stringify({ refresh_token: refreshToken, redirect_uri: REDIRECT_URI })
       });
 
-      if (!resp.ok) throw new Error('Refresh failed');
+      if (resp.status === 429) {
+        // Rate-limited — don't log out, just keep the old session
+        console.warn('[auth] Rate limited during token refresh — session preserved');
+        return;
+      }
+
+      if (!resp.ok) throw new Error(`Refresh failed: ${resp.status}`);
 
       const data = await resp.json();
       accessToken = data.access_token;
       refreshToken = data.refresh_token;
       saveRefreshToken(refreshToken, data.refresh_token_expires_in);
     } catch (err) {
+      console.warn('[auth] Token refresh failed:', err.message);
       logout();
       throw err;
     } finally {
