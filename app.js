@@ -569,6 +569,17 @@ function renderDashboard() {
     badge.textContent = chargeStatus.replace(/_/g, ' ');
     badge.style.background = chargeStatus.includes('CHARGING') ? 'var(--good-soft)' : 'var(--info-soft)';
     badge.style.color = chargeStatus.includes('CHARGING') ? 'var(--good)' : 'var(--info)';
+    // Tooltip explaining charge status
+    const TOOLTIPS = {
+      CHARGING: 'Vehicle is actively charging',
+      NOT_READY: 'Battery full or unplugged — not in a charge-ready state',
+      CHARGED: 'Fully charged and still plugged in',
+      READY: 'Ready to charge (plugged in, waiting for schedule or timer)',
+      DISCONNECTED: 'Charge cable is not connected to the vehicle',
+      ERROR: 'Charging system fault detected',
+    };
+    const key = chargeStatus.toUpperCase().replace(/ /g, '_');
+    badge.title = TOOLTIPS[key] ?? `Charge status: ${chargeStatus.replace(/_/g, ' ')}`;
   } else if (!fetchOk.telemetry) {
     badge.textContent = 'Data unavailable';
     badge.style.background = 'var(--danger-soft)';
