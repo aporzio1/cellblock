@@ -372,20 +372,19 @@ async function refreshData() {
     refs['vin-display'].textContent = vinCache;
 
     // Stagger API calls to avoid Ford's aggressive rate limits — fire
-    // telemetry+health first (most critical), then wallbox+departure+charge
-    // with small delays between each. All still run concurrently within
-    // their groups; the stagger only separates the groups.
+    // telemetry+health first (most critical), then wallbox, departure-times,
+    // and charge-schedules sequentially with delays between each.
     const [telemetry, health] = await Promise.all([
       apiCall(`/telemetry?vin=${vinCache}`).catch(() => null),
       apiCall(`/vehicle-health/alerts?vin=${vinCache}`).catch(() => null)
     ]);
-    // Small delay before secondary calls to respect rate limits
-    await new Promise(r => setTimeout(r, 500));
-    const [wallbox, departureTimes, chargeSchedules] = await Promise.all([
-      apiCall(`/wallbox?vin=${vinCache}`).catch(() => null),
-      apiCall(`/electric/departure-times?vin=${vinCache}`).catch(() => null),
-      apiCall(`/electric/charge-schedules?vin=${vinCache}`).catch(() => null)
-    ]);
+    // Wait before secondary calls to respect rate limits
+    await new Promise(r => setTimeout(r, 2000));
+    const wallbox = await apiCall(`/wallbox?vin=${vinCache}`).catch(() => null);
+    await new Promise(r => setTimeout(r, 1000));
+    const departureTimes = await apiCall(`/electric/departure-times?vin=${vinCache}`).catch(() => null);
+    await new Promise(r => setTimeout(r, 1000));
+    const chargeSchedules = await apiCall(`/electric/charge-schedules?vin=${vinCache}`).catch(() => null);
 
     vehicleData = {
       telemetry, health, wallbox, departureTimes, chargeSchedules,
