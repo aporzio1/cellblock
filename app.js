@@ -23,6 +23,8 @@ const FORD_AUTHORIZE_URL = 'https://api.vehicle.ford.com/fcon-public/v1/auth/ini
 const BACKEND_BASE = 'https://proxy.cellblock.cc';
 const API_BASE = `${BACKEND_BASE}/api/data`;
 const REFRESH_KEY = 'ford_refresh';
+const FORD_RATE_LIMIT_KEY = 'cellblock_ford_next_request_at';
+const FORD_REQUEST_INTERVAL_MS = 30 * 1000;
 // Fallback bound on refresh-token lifetime when Ford's token response doesn't
 // tell us its own expiry. See the TOKEN STORAGE section below for the
 // security rationale and a longer-term server-side recommendation.
@@ -35,6 +37,18 @@ let vehicleData = {};
 let refreshPromise = null;         // single-flight guard
 let vinCache = null;               // VIN doesn't change, fetch once
 let refs = {};                     // cached DOM lookups
+let fordRequestQueue = Promise.resolve();
+let nextFordRequestAt = Number(localStorage.getItem(FORD_RATE_LIMIT_KEY)) || 0;
+let fordCountdownTimer = null;
+let fordRateLimitChannel = null;
+
+class FordRateLimitError extends Error {
+  constructor(retryAfterMs) {
+    super('Ford is rate limiting requests');
+    this.name = 'FordRateLimitError';
+    this.retryAfterMs = retryAfterMs;
+  }
+}
 
 // Real /telemetry doorStatus array entries are keyed by vehicleDoor +
 // vehicleOccupantRole (e.g. {vehicleDoor:"REAR_LEFT", vehicleOccupantRole:
@@ -75,6 +89,8 @@ const mToFt = m => typeof m === 'number' ? m * 3.28084 : undefined;
 // ===== INIT — single path =====
 document.addEventListener('DOMContentLoaded', () => {
   cacheDom();
+  setupFordRateLimitSync();
+  updateFordRateLimitUI();
   const params = new URLSearchParams(window.location.search);
   // Gate dev-only features behind ?dev=1
   if (!params.has('dev')) {
@@ -168,7 +184,7 @@ function cacheDom() {
     'last-update','top-alerts','badge-vehicle','badge-tire','manual-token-input',
     'vehicle-image','vehicle-image-card',
     'battery-capacity','energy-remaining','odometer-display','outside-temp',
-    'time-to-full','gear-position','ignition-status'
+    'time-to-full','gear-position','ignition-status','refresh-button','ford-rate-limit'
   ];
   for (const id of ids) refs[id] = document.getElementById(id);
 }
@@ -339,15 +355,111 @@ function clearTokens() {
   localStorage.removeItem(REFRESH_KEY);
 }
 
-// ===== API — single-flight refresh, one-deep retry =====
-async function apiCall(endpoint, retried = false) {
-  const resp = await fetch(`${API_BASE}${endpoint}`, {
+// ===== API — serialized Ford requests, auth retry, and cooldown recovery =====
+function wait(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+function readFordCooldown() {
+  const stored = Number(localStorage.getItem(FORD_RATE_LIMIT_KEY)) || 0;
+  return Math.max(nextFordRequestAt, stored);
+}
+
+function setFordCooldown(until) {
+  nextFordRequestAt = Math.max(readFordCooldown(), until);
+  localStorage.setItem(FORD_RATE_LIMIT_KEY, String(nextFordRequestAt));
+  fordRateLimitChannel?.postMessage(nextFordRequestAt);
+  updateFordRateLimitUI();
+}
+
+function retryAfterMilliseconds(response) {
+  const value = response.headers.get('Retry-After');
+  if (!value) return FORD_REQUEST_INTERVAL_MS;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : FORD_REQUEST_INTERVAL_MS;
+}
+
+function formatRemaining(milliseconds) {
+  const seconds = Math.max(1, Math.ceil(milliseconds / 1000));
+  return seconds >= 60
+    ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+    : `${seconds}s`;
+}
+
+function updateFordRateLimitUI() {
+  if (fordCountdownTimer) {
+    clearTimeout(fordCountdownTimer);
+    fordCountdownTimer = null;
+  }
+
+  const remaining = Math.max(0, readFordCooldown() - Date.now());
+  if (refs['ford-rate-limit']) {
+    refs['ford-rate-limit'].textContent = remaining > 0
+      ? `Ford refresh available in ${formatRemaining(remaining)}`
+      : 'Ford refresh ready';
+  }
+  if (refs['refresh-button']) refs['refresh-button'].disabled = isRefreshing || remaining > 0;
+
+  if (remaining > 0) {
+    fordCountdownTimer = setTimeout(updateFordRateLimitUI, Math.min(1000, remaining));
+  }
+}
+
+function setupFordRateLimitSync() {
+  window.addEventListener('storage', event => {
+    if (event.key !== FORD_RATE_LIMIT_KEY) return;
+    nextFordRequestAt = Math.max(nextFordRequestAt, Number(event.newValue) || 0);
+    updateFordRateLimitUI();
+  });
+  if ('BroadcastChannel' in window) {
+    fordRateLimitChannel = new BroadcastChannel('cellblock-ford-rate-limit');
+    fordRateLimitChannel.onmessage = event => {
+      nextFordRequestAt = Math.max(nextFordRequestAt, Number(event.data) || 0);
+      updateFordRateLimitUI();
+    };
+  }
+}
+
+function enqueueFordRequest(request) {
+  const run = async () => {
+    const waitTime = Math.max(0, readFordCooldown() - Date.now());
+    if (waitTime > 0) await wait(waitTime);
+
+    const response = await request();
+    setFordCooldown(Date.now() + FORD_REQUEST_INTERVAL_MS);
+    return response;
+  };
+
+  const queuedRequest = fordRequestQueue.then(run, run);
+  fordRequestQueue = queuedRequest.catch(() => {});
+  return queuedRequest;
+}
+
+async function fordFetch(url, options) {
+  return enqueueFordRequest(() => fetch(url, options));
+}
+
+async function apiCall(endpoint, options = {}) {
+  const { retriedAuth = false, retriedRateLimit = false } = options;
+  const resp = await fordFetch(`${API_BASE}${endpoint}`, {
     headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
   });
 
-  if (resp.status === 401 && refreshToken && !retried) {
+  if (resp.status === 401 && refreshToken && !retriedAuth) {
     await refreshAccessToken();
-    return apiCall(endpoint, true);
+    return apiCall(endpoint, { ...options, retriedAuth: true });
+  }
+
+  if (resp.status === 429) {
+    const retryAfterMs = retryAfterMilliseconds(resp);
+    setFordCooldown(Date.now() + retryAfterMs);
+    if (!retriedRateLimit) {
+      await wait(retryAfterMs);
+      return apiCall(endpoint, { ...options, retriedRateLimit: true });
+    }
+    throw new FordRateLimitError(retryAfterMs);
   }
 
   if (!resp.ok) throw new Error(`API error: ${resp.status}`);
@@ -359,16 +471,16 @@ async function refreshAccessToken() {
 
   refreshPromise = (async () => {
     try {
-      const resp = await fetch(`${BACKEND_BASE}/api/refresh`, {
+      const resp = await fordFetch(`${BACKEND_BASE}/api/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refresh_token: refreshToken, redirect_uri: REDIRECT_URI })
       });
 
       if (resp.status === 429) {
-        // Rate-limited — don't log out, just keep the old session
-        console.warn('[auth] Rate limited during token refresh — session preserved');
-        return;
+        const retryAfterMs = retryAfterMilliseconds(resp);
+        setFordCooldown(Date.now() + retryAfterMs);
+        throw new FordRateLimitError(retryAfterMs);
       }
 
       if (!resp.ok) throw new Error(`Refresh failed: ${resp.status}`);
@@ -379,6 +491,10 @@ async function refreshAccessToken() {
       saveRefreshToken(refreshToken, data.refresh_token_expires_in);
     } catch (err) {
       console.warn('[auth] Token refresh failed:', err.message);
+      if (err instanceof FordRateLimitError) {
+        setStatus(`Ford is rate limiting requests — retrying in ${formatRemaining(err.retryAfterMs)}`);
+        throw err;
+      }
       // Don't log out — just show login screen and keep the token
       // in case it works on a later attempt.
       showLogin();
@@ -433,6 +549,7 @@ async function refreshData() {
   }
 
   isRefreshing = true;
+  updateFordRateLimitUI();
   setStatus('Updating...');
   toggleLoading(true);
 
@@ -448,22 +565,22 @@ async function refreshData() {
 
     refs['vin-display'].textContent = vinCache;
 
-    // Fetch telemetry+health (critical), fall back to cache on failure
+    // Fetch telemetry first. Ford allows one request every 30 seconds, so
+    // every endpoint request flows through the serialized queue above.
     let telemetry = getFromCache('telemetry');
     let health = getFromCache('health');
-    if (!telemetry || !health) {
-      try {
-        const [t, h] = await Promise.all([
-          apiCall(`/telemetry?vin=${vinCache}`),
-          apiCall(`/vehicle-health/alerts?vin=${vinCache}`)
-        ]);
-        telemetry = t; health = h;
+    try {
+      if (!telemetry) {
+        telemetry = await apiCall(`/telemetry?vin=${vinCache}`);
         if (telemetry) saveToCache('telemetry', telemetry);
-        if (health) saveToCache('health', health);
-      } catch (err) {
-        console.warn('[refresh] primary calls failed:', err.message || err);
-        if (!telemetry && !health) setStatus('Rate limited — showing cached data');
       }
+      if (!health) {
+        health = await apiCall(`/vehicle-health/alerts?vin=${vinCache}`);
+        if (health) saveToCache('health', health);
+      }
+    } catch (err) {
+      console.warn('[refresh] primary calls failed:', err.message || err);
+      if (!telemetry && !health) setStatus('Rate limited — showing cached data');
     }
 
     // Secondary calls (wallbox/departure/charge) only attempt if caches are empty
@@ -512,6 +629,7 @@ async function refreshData() {
   } finally {
     toggleLoading(false);
     isRefreshing = false;
+    updateFordRateLimitUI();
   }
 }
 

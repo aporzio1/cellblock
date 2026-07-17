@@ -221,7 +221,8 @@
   <!-- Footer: VIN + refresh -->
   <div id="refresh-bar" style="display:none;">
     <span id="vin-display" class="vin-footer">---</span>
-    <button class="btn-secondary" onclick="refreshData()">⟳ Refresh Data</button>
+    <span id="ford-rate-limit" class="ford-rate-limit" aria-live="polite"></span>
+    <button id="refresh-button" class="btn-secondary" onclick="refreshData()">⟳ Refresh Data</button>
   </div>
 </div>
 

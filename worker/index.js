@@ -18,6 +18,36 @@ const FORD_DATA_BASE = 'https://api.vehicle.ford.com/fcon-query/v1';
 const FORD_BUILDER_URL = 'https://build.ford.com/dig/direct/HD-FULL/Vin[VIN]/EXT/4/vehicle.png';
 const DATA_PREFIX = '/api/data/';
 const REGISTERED_REDIRECT_URI = 'https://cellblock.cc/';
+const FORD_REQUEST_INTERVAL_MS = 30_000;
+
+// One Durable Object per active Ford bearer token serializes requests from
+// separate browser tabs. The Worker stores only a SHA-256 digest, never the
+// token itself. A token refresh creates a new limiter identity, while the
+// browser queue prevents an immediate same-tab burst during that transition.
+export class FordRateLimiter {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env;
+  }
+
+  allow() {
+    const now = Date.now();
+    const nextAllowedAt = this.ctx.storage.kv.get('nextAllowedAt') || 0;
+    if (now < nextAllowedAt) {
+      return { allowed: false, retryAfterMs: nextAllowedAt - now };
+    }
+
+    this.ctx.storage.kv.put('nextAllowedAt', now + FORD_REQUEST_INTERVAL_MS);
+    return { allowed: true, retryAfterMs: 0 };
+  }
+
+  defer(retryAfterMs) {
+    const now = Date.now();
+    const nextAllowedAt = this.ctx.storage.kv.get('nextAllowedAt') || 0;
+    const deferredUntil = now + Math.max(retryAfterMs, FORD_REQUEST_INTERVAL_MS);
+    this.ctx.storage.kv.put('nextAllowedAt', Math.max(nextAllowedAt, deferredUntil));
+  }
+}
 
 function corsHeaders(env, request) {
   const allowed = (env.ALLOWED_ORIGIN || '*').split(',').map(o => o.trim());
@@ -27,6 +57,7 @@ function corsHeaders(env, request) {
     'Access-Control-Allow-Origin': matched,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Expose-Headers': 'Retry-After',
     'Vary': 'Origin'
   };
 }
@@ -48,6 +79,33 @@ function json(env, request, status, obj) {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders(env, request) }
+  });
+}
+
+function retryAfterMilliseconds(value) {
+  if (!value) return FORD_REQUEST_INTERVAL_MS;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : FORD_REQUEST_INTERVAL_MS;
+}
+
+async function limiterFor(env, authorization) {
+  const data = new TextEncoder().encode(authorization);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  const key = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+  return env.FORD_RATE_LIMITER.get(env.FORD_RATE_LIMITER.idFromName(key));
+}
+
+function rateLimitedResponse(env, request, retryAfterMs) {
+  const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+  return new Response(JSON.stringify({ error: 'Ford request cooldown active', retryAfterSeconds }), {
+    status: 429,
+    headers: {
+      'Content-Type': 'application/json',
+      'Retry-After': String(retryAfterSeconds),
+      ...corsHeaders(env, request)
+    }
   });
 }
 
@@ -138,25 +196,9 @@ export default {
           return new Response(imageResp.body, { headers });
         }
 
-        const auth = request.headers.get('authorization');
-        const fordResp = await fetch(`${FORD_DATA_BASE}/vehicle-image?vin=${vin}`, {
-          headers: { 'Authorization': auth || '', 'Accept': 'application/json' }
-        });
-        if (fordResp.ok) {
-          const data = await fordResp.json();
-          const fallbackUrl = data.vehicleImage;
-          if (fallbackUrl) {
-            const fallbackImg = await fetch(fallbackUrl, {
-              headers: { 'User-Agent': 'curl/8.4.0' }
-            });
-            if (fallbackImg.ok) {
-              const headers = new Headers(fallbackImg.headers);
-              headers.set('Cache-Control', 'public, max-age=86400');
-              headers.set('Access-Control-Allow-Origin', '*');
-              return new Response(fallbackImg.body, { headers });
-            }
-          }
-        }
+        // Do not fall back to Ford's telemetry API for an image. A dashboard
+        // image is non-essential and must never consume the 30-second Ford
+        // request budget; the browser uses a bundled model image instead.
         return json(env, request, 502, { error: 'Image unavailable' });
       }
 
@@ -164,6 +206,12 @@ export default {
         const suffix = url.pathname.slice(DATA_PREFIX.length) + url.search;
         const auth = request.headers.get('authorization');
         if (!auth) return json(env, request, 401, { error: 'Authorization header is required' });
+
+        const limiter = await limiterFor(env, auth);
+        const permission = await limiter.allow();
+        if (!permission.allowed) {
+          return rateLimitedResponse(env, request, permission.retryAfterMs);
+        }
 
         const fordResp = await fetch(`${FORD_DATA_BASE}/${suffix}`, {
           headers: { 'Authorization': auth, 'Accept': 'application/json' }
@@ -175,6 +223,9 @@ export default {
         };
         // Pass through Retry-After if Ford rate-limited us
         const retryAfter = fordResp.headers.get('Retry-After');
+        if (fordResp.status === 429) {
+          await limiter.defer(retryAfterMilliseconds(retryAfter));
+        }
         if (retryAfter) headers['Retry-After'] = retryAfter;
         return new Response(body, { status: fordResp.status, headers });
       }

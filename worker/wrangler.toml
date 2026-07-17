@@ -2,6 +2,15 @@ name = "cellblock-proxy"
 main = "index.js"
 compatibility_date = "2026-07-01"
 
+[durable_objects]
+bindings = [
+  { name = "FORD_RATE_LIMITER", class_name = "FordRateLimiter" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FordRateLimiter"]
+
 [vars]
 # Comma-separated — both allowed during the github.io -> cellblock.cc migration.
 ALLOWED_ORIGIN = "https://cellblock.cc,https://proxy.cellblock.cc"
