@@ -1,5 +1,20 @@
 // ===== CellBlock — Ford EV Telemetry Dashboard =====
 
+// iOS App Bridge: when the iOS app uses ASWebAuthenticationSession for OAuth,
+// Ford redirects to https://cellblock.cc/?src=ios&code=...&state=...
+// This runs immediately (before DOMContentLoaded) and redirects to the
+// cellblock:// custom URL scheme so ASWebAuthenticationSession can intercept
+// the callback. The web version of CellBlock never sends ?src=ios, so its
+// login flow is unaffected.
+(function() {
+    var params = new URLSearchParams(window.location.search);
+    var code = params.get('code');
+    var state = params.get('state');
+    if (code && state && params.get('src') === 'ios') {
+        window.location.href = 'cellblock://callback?code=' + encodeURIComponent(code) + '&state=' + encodeURIComponent(state);
+    }
+})();
+
 // ===== CONFIG =====
 // Endpoints below are confirmed against the real FordConnect-2.0-Postman
 // collection (Azure AD B2C auth, /fcon-query/v1/* data API) — the previous
