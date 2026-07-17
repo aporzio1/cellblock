@@ -583,23 +583,24 @@ async function refreshData() {
       if (!telemetry && !health) setStatus('Rate limited — showing cached data');
     }
 
-    // Secondary calls (wallbox/departure/charge) only attempt if caches are empty
+    // Secondary calls only fetch their own missing cache entry. Do not spend a
+    // Ford request because a different optional endpoint lacks data.
     let wallbox = getFromCache('wallbox');
     let departureTimes = getFromCache('departureTimes');
     let chargeSchedules = getFromCache('chargeSchedules');
-    if (!wallbox || !departureTimes || !chargeSchedules) {
-      // Brief delay before secondary calls
-      await new Promise(r => setTimeout(r, 1000));
+    if (!wallbox) {
       try {
         wallbox = await apiCall(`/wallbox?vin=${vinCache}`);
         if (wallbox) saveToCache('wallbox', wallbox);
       } catch (err) { console.warn('[wallbox]', err.message || err); }
-      await new Promise(r => setTimeout(r, 1000));
+    }
+    if (!departureTimes) {
       try {
         departureTimes = await apiCall(`/electric/departure-times?vin=${vinCache}`);
         if (departureTimes) saveToCache('departureTimes', departureTimes);
       } catch (err) { console.warn('[departure]', err.message || err); }
-      await new Promise(r => setTimeout(r, 1000));
+    }
+    if (!chargeSchedules) {
       try {
         chargeSchedules = await apiCall(`/electric/charge-schedules?vin=${vinCache}`);
         if (chargeSchedules) saveToCache('chargeSchedules', chargeSchedules);
