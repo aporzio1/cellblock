@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.andrewporzio.cellblock",
+      "sha256_cert_fingerprints": [
+        "45:92:AC:26:6D:E6:5E:FE:27:D0:BD:CC:BD:60:EE:44:A0:1E:F1:AB:CD:6B:44:52:D3:F4:52:CE:44:D1:6C:7A"
+      ]
+    }
+  }
+]
