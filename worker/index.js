@@ -232,6 +232,13 @@ export default {
 
       return json(env, request, 404, { error: 'Not found' });
     } catch (err) {
+      // Keep internal details out of client responses, but retain enough
+      // context in Workers Logs to diagnose an upstream Ford failure.
+      console.error('Proxy request failed', {
+        method: request.method,
+        path: url.pathname,
+        message: err instanceof Error ? err.message : String(err)
+      });
       return json(env, request, 502, { error: 'Proxy request failed' });
     }
   }
