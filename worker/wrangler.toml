@@ -10,7 +10,7 @@ bindings = [
 [[kv_namespaces]]
 # Replace this placeholder with the ID returned by the provisioning command below.
 binding = "INSTALLATIONS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "ffa6f41ca51849459a941f2467c67d6d"
 
 [[migrations]]
 tag = "v1"
