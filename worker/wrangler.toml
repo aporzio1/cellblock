@@ -28,4 +28,4 @@ ALLOWED_ORIGIN = "https://cellblock.cc,https://proxy.cellblock.cc"
 # Provision the installation KV namespace, then replace the placeholder ID above:
 #   npx wrangler kv namespace create INSTALLATIONS
 # Generate a 32-byte base64 key without printing it:
-#   openssl rand -base64 32 | npx wrangler secret put INSTALLATION_ENCRYPTION_KEY
+#   openssl rand -base64 32 | tr -d '\\n' | npx wrangler secret put INSTALLATION_ENCRYPTION_KEY
