@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { handleInstallationRequest } from './installations.js';
+import { runScheduledMonitoring } from './monitoring.js';
 
 // Lightning Rod token/data proxy — Cloudflare Worker port of server/index.js.
 //
@@ -255,5 +256,13 @@ export default {
       });
       return json(env, request, 502, { error: 'Proxy request failed' });
     }
+  },
+
+  async scheduled(_controller, env, ctx) {
+    // Keep the cron invocation best-effort: one malformed authorization or
+    // unavailable upstream must never abort the remaining installations.
+    const work = runScheduledMonitoring(env).catch(() => undefined);
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(work);
+    else await work;
   }
 };

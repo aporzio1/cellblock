@@ -172,6 +172,7 @@ test('Ford authorization returns status while encrypting the refresh token', asy
   const response = await handleInstallationRequest(installationRequest('/api/ford/authorize', data.token, {
     body: {
       opaqueVehicleID: 'opaque-vehicle',
+      vin: '1FTVW1ELXPWG00001',
       refreshToken,
       redirectURI: 'https://cellblock.cc/'
     }
@@ -181,6 +182,33 @@ test('Ford authorization returns status while encrypting the refresh token', asy
   for (const value of targetEnv.INSTALLATIONS.values.values()) {
     assert.ok(!String(value).includes(refreshToken));
   }
+});
+
+test('Ford authorization validates and encrypts the selected VIN', async () => {
+  const targetEnv = env();
+  const { data } = await bootstrap(targetEnv);
+  const vin = '1FTVW1ELXPWG00001';
+  const response = await handleInstallationRequest(installationRequest('/api/ford/authorize', data.token, {
+    body: {
+      opaqueVehicleID: 'opaque-vehicle',
+      vin,
+      refreshToken: 'ford-refresh-secret',
+      redirectURI: 'https://cellblock.cc/'
+    }
+  }), targetEnv);
+  assert.equal(response.status, 200);
+  for (const value of targetEnv.INSTALLATIONS.values.values()) {
+    assert.ok(!String(value).includes(vin));
+  }
+  const invalid = await handleInstallationRequest(installationRequest('/api/ford/authorize', data.token, {
+    body: {
+      opaqueVehicleID: 'opaque-vehicle',
+      vin: '1ftvw1elxpwg00001',
+      refreshToken: 'ford-refresh-secret',
+      redirectURI: 'https://cellblock.cc/'
+    }
+  }), targetEnv);
+  assert.equal(invalid.status, 400);
 });
 
 test('all live activity routes require the installation credential', async () => {

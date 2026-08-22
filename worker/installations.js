@@ -1,6 +1,7 @@
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_AUTHORIZATION_BYTES = 8 * 1024;
 const REGISTERED_REDIRECT_URI = 'https://cellblock.cc/';
+import { encryptValue, validateVIN } from './monitoring.js';
 
 class BadRequest extends Error {}
 
@@ -261,11 +262,13 @@ async function registerToken(env, request) {
     const apnsEnvironment = stringField(body, 'apnsEnvironment', 64);
     const activityID = optionalStringField(body, 'activityID', 256);
     const opaqueVehicleHash = await sha256(opaqueVehicleID);
+    const tokenCiphertext = await encryptValue(token, env.INSTALLATION_ENCRYPTION_KEY);
     await env.INSTALLATIONS.put(
       `live-activity-token:${credential.installationID}:${opaqueVehicleHash}:${await sha256(tokenKind)}`,
       JSON.stringify({
         subjectHash: credential.record.subjectHash,
         tokenHash: await sha256(token),
+        tokenCiphertext,
         tokenKind,
         apnsEnvironment,
         ...(activityID === undefined ? {} : { activityID })
@@ -329,6 +332,8 @@ async function authorize(env, request) {
   try {
     const body = await readJson(request);
     const opaqueVehicleID = stringField(body, 'opaqueVehicleID', 512);
+    const vin = stringField(body, 'vin', 17);
+    if (!validateVIN(vin)) throw new BadRequest('vin must be 17 uppercase alphanumeric characters');
     const refreshToken = stringField(body, 'refreshToken', 4096);
     const redirectURI = stringField(body, 'redirectURI', 2048);
     if (redirectURI !== REGISTERED_REDIRECT_URI) throw new BadRequest('Invalid redirectURI');
@@ -336,13 +341,16 @@ async function authorize(env, request) {
       return response(env, request, 503, { error: 'Installation encryption is not configured' });
     }
     const refreshTokenCiphertext = await encryptRefreshToken(refreshToken, env.INSTALLATION_ENCRYPTION_KEY);
+    const vinCiphertext = await encryptValue(vin, env.INSTALLATION_ENCRYPTION_KEY);
     await env.INSTALLATIONS.put(
       `ford-authorization:${credential.installationID}`,
       JSON.stringify({
         subjectHash: credential.record.subjectHash,
         opaqueVehicleIDHash: await sha256(opaqueVehicleID),
         redirectURI,
-        refreshTokenCiphertext
+        refreshTokenCiphertext,
+        vinCiphertext,
+        status: 'authorized'
       })
     );
     return response(env, request, 200, { status: 'authorized' });

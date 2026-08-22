@@ -2,6 +2,9 @@ name = "cellblock-live-activities"
 main = "index.js"
 compatibility_date = "2026-07-01"
 
+[triggers]
+crons = ["* * * * *"]
+
 [durable_objects]
 bindings = [
   { name = "FORD_RATE_LIMITER", class_name = "FordRateLimiter" }
@@ -23,3 +26,7 @@ ALLOWED_ORIGIN = "https://cellblock.cc,https://proxy.cellblock.cc"
 #   npx wrangler secret put CLIENT_SECRET
 #   npx wrangler secret put INSTALLATION_ENCRYPTION_KEY
 #   openssl rand -base64 32 | tr -d '\n' | npx wrangler secret put INSTALLATION_ENCRYPTION_KEY
+#   npx wrangler secret put APNS_TEAM_ID
+#   npx wrangler secret put APNS_KEY_ID
+#   npx wrangler secret put APNS_PRIVATE_KEY_P8
+#   npx wrangler secret put APNS_TOPIC
