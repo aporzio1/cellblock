@@ -129,11 +129,16 @@ async function installationCredential(env, request) {
   return { installationID, token, record };
 }
 
-async function installationCredentialFromBearer(env, request, body) {
+async function installationCredentialFromBearer(env, request) {
   const token = parseBearer(request);
   if (!token) return { error: response(env, request, 401, { error: 'Installation authorization is required' }) };
 
-  const installationID = stringField(body, 'installationID', 128);
+  const tokenHash = await sha256(token);
+  const installationID = await env.INSTALLATIONS.get('credential:' + tokenHash);
+  if (!installationID || installationID.length > 128) {
+    return { error: response(env, request, 401, { error: 'Invalid installation authorization' }) };
+  }
+
   const raw = await env.INSTALLATIONS.get(installationID);
   if (!raw) return { error: response(env, request, 401, { error: 'Invalid installation authorization' }) };
 
@@ -143,7 +148,6 @@ async function installationCredentialFromBearer(env, request, body) {
   } catch {
     return { error: response(env, request, 401, { error: 'Invalid installation authorization' }) };
   }
-  const tokenHash = await sha256(token);
   if (!equalStrings(record.tokenHash, tokenHash)) {
     return { error: response(env, request, 401, { error: 'Invalid installation authorization' }) };
   }
@@ -180,10 +184,14 @@ async function bootstrap(env, request) {
 
   const installationID = crypto.randomUUID();
   const token = randomToken();
+  const tokenHash = await sha256(token);
   await env.INSTALLATIONS.put(installationID, JSON.stringify({
-    tokenHash: await sha256(token),
+    tokenHash,
     subjectHash: await sha256(fordToken)
   }));
+  // The index contains no bearer token, only its one-way hash and the random
+  // installation ID needed to find the ownership record.
+  await env.INSTALLATIONS.put('credential:' + tokenHash, installationID);
   return response(env, request, 200, { installationID, token });
 }
 
@@ -195,7 +203,7 @@ async function enroll(env, request) {
     const vehicleID = stringField(body, 'vehicleID', 256);
     const pushToken = stringField(body, 'pushToken', 4096);
     const activityID = stringField(body, 'activityID', 256);
-    const credential = await installationCredentialFromBearer(env, request, body);
+    const credential = await installationCredentialFromBearer(env, request);
     if (credential.error) return credential.error;
     await env.INSTALLATIONS.put(
       `live-activity:${credential.installationID}:${await sha256(activityID)}`,
