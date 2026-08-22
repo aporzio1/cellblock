@@ -1,0 +1,25 @@
+name = "cellblock-live-activities"
+main = "index.js"
+compatibility_date = "2026-07-01"
+
+[durable_objects]
+bindings = [
+  { name = "FORD_RATE_LIMITER", class_name = "FordRateLimiter" }
+]
+
+[[kv_namespaces]]
+binding = "INSTALLATIONS"
+id = "a0e5a5bc37464afa933101fc8de859e0"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FordRateLimiter"]
+
+[vars]
+ALLOWED_ORIGIN = "https://cellblock.cc,https://proxy.cellblock.cc"
+
+# Secrets (set once, stored by Cloudflare, never in this repo):
+#   npx wrangler secret put CLIENT_ID
+#   npx wrangler secret put CLIENT_SECRET
+#   npx wrangler secret put INSTALLATION_ENCRYPTION_KEY
+#   openssl rand -base64 32 | tr -d '\n' | npx wrangler secret put INSTALLATION_ENCRYPTION_KEY
