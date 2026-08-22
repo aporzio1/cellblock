@@ -214,7 +214,7 @@ async function authorize(env, request) {
         subjectHash: credential.record.subjectHash,
         opaqueVehicleID,
         redirectURI,
-        refreshToken: encryptedRefreshToken
+        refreshTokenCiphertext: encryptedRefreshToken
       })
     );
   } catch (error) {
