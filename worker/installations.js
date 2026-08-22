@@ -104,31 +104,6 @@ function randomToken() {
   return base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
 }
 
-async function installationCredential(env, request) {
-  const token = parseBearer(request);
-  if (!token) return { error: response(env, request, 401, { error: 'Installation authorization is required' }) };
-
-  const installationID = request.headers.get('x-installation-id');
-  if (!installationID || installationID.length > 128) {
-    return { error: response(env, request, 401, { error: 'Installation authorization is required' }) };
-  }
-
-  const raw = await env.INSTALLATIONS.get(installationID);
-  if (!raw) return { error: response(env, request, 401, { error: 'Invalid installation authorization' }) };
-
-  let record;
-  try {
-    record = JSON.parse(raw);
-  } catch {
-    return { error: response(env, request, 401, { error: 'Invalid installation authorization' }) };
-  }
-  const tokenHash = await sha256(token);
-  if (!equalStrings(record.tokenHash, tokenHash)) {
-    return { error: response(env, request, 401, { error: 'Invalid installation authorization' }) };
-  }
-  return { installationID, token, record };
-}
-
 async function installationCredentialFromBearer(env, request) {
   const token = parseBearer(request);
   if (!token) return { error: response(env, request, 401, { error: 'Installation authorization is required' }) };
@@ -227,7 +202,7 @@ async function authorize(env, request) {
     if (redirectURI !== REGISTERED_REDIRECT_URI) {
       throw new BadRequest('Invalid redirectURI');
     }
-    const credential = await installationCredentialFromBearer(env, request, body);
+    const credential = await installationCredentialFromBearer(env, request);
     if (credential.error) return credential.error;
     if (typeof env.INSTALLATION_ENCRYPTION_KEY !== 'string' || env.INSTALLATION_ENCRYPTION_KEY.length === 0) {
       return response(env, request, 503, { error: 'Installation encryption is not configured' });
