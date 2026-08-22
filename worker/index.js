@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { handleInstallationRequest } from './installations.js';
 
 // Lightning Rod token/data proxy — Cloudflare Worker port of server/index.js.
 //
@@ -134,6 +135,15 @@ export default {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(env, request) });
     }
+
+    // Installation routes authenticate independently of the browser Ford
+    // proxy secrets, so native clients receive explicit 401/503 responses.
+    if (url.pathname !== DATA_PREFIX + 'vehicle-image') {
+      const blocked = enforceOrigin(env, request);
+      if (blocked) return json(env, request, 403, blocked);
+    }
+    const installationResponse = await handleInstallationRequest(request, env);
+    if (installationResponse) return installationResponse;
 
     if (!env.CLIENT_ID || !env.CLIENT_SECRET) {
       return json(env, request, 500, { error: 'Worker missing CLIENT_ID/CLIENT_SECRET secrets' });
