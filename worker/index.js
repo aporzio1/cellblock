@@ -60,7 +60,7 @@ function corsHeaders(env, request) {
   const matched = allowed.includes('*') ? '*' : (allowed.includes(requestOrigin) ? requestOrigin : allowed[0]);
   return {
     'Access-Control-Allow-Origin': matched,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Expose-Headers': 'Retry-After',
     'Vary': 'Origin'
@@ -136,8 +136,8 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(env, request) });
     }
 
-    // Installation routes authenticate independently of the browser Ford
-    // proxy secrets, so native clients receive explicit 401/503 responses.
+    // Native installation and Live Activity requests authenticate with the
+    // installation credential, independently of Ford proxy secrets.
     if (url.pathname !== DATA_PREFIX + 'vehicle-image') {
       const blocked = enforceOrigin(env, request);
       if (blocked) return json(env, request, 403, blocked);

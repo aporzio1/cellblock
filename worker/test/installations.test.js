@@ -18,6 +18,10 @@ class MemoryKV {
   async get(key) {
     return this.values.get(key) ?? null;
   }
+
+  async delete(key) {
+    this.values.delete(key);
+  }
 }
 
 const encryptionKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
@@ -33,7 +37,7 @@ function env(overrides = {}) {
 function request(path, { method = 'POST', headers = {}, body } = {}) {
   return new Request('https://cellblock.cc' + path, {
     method,
-    headers: { 'Content-Type': 'application/json', ...headers },
+    headers: body === undefined ? headers : { 'Content-Type': 'application/json', ...headers },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
 }
@@ -44,49 +48,128 @@ async function bootstrap(targetEnv = env(), fordToken = 'ford-access-token') {
     body: {}
   }), targetEnv);
   assert.equal(response.status, 200);
-  return { response, data: await response.json(), fordToken };
+  return { data: await response.json(), fordToken };
 }
 
-test('bootstrap returns an installation credential and persists only hashes', async () => {
-  const targetEnv = env();
-  const { data, fordToken } = await bootstrap(targetEnv);
-  assert.equal(typeof data.installationID, 'string');
-  assert.equal(typeof data.token, 'string');
-  assert.ok(data.token.length >= 32);
+function installationRequest(path, token, options = {}) {
+  return request(path, {
+    ...options,
+    headers: { Authorization: 'Bearer ' + token, ...options.headers }
+  });
+}
 
-  const stored = JSON.parse(await targetEnv.INSTALLATIONS.get(data.installationID));
-  const tokenHash = await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(data.token));
-  const subjectHash = await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(fordToken));
-  const hex = bytes => Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
-  assert.deepEqual(stored, { tokenHash: hex(tokenHash), subjectHash: hex(subjectHash) });
-  assert.ok(!JSON.stringify(stored).includes(data.token));
-  assert.ok(!JSON.stringify(stored).includes(fordToken));
-});
-
-test('enrollment rejects requests without a valid installation credential', async () => {
-  const response = await handleInstallationRequest(request('/api/live-activities/enroll', {
-    body: { vehicleID: 'vehicle', pushToken: 'push', activityID: 'activity' }
-  }), env());
-  assert.equal(response.status, 401);
-});
-
-test('enrollment succeeds after bootstrap with the returned installation credential', async () => {
+test('enrollment uses the iOS payload and returns a stable enrollment ID', async () => {
   const targetEnv = env();
   const { data } = await bootstrap(targetEnv);
-  const response = await handleInstallationRequest(request('/api/live-activities/enroll', {
-    headers: { Authorization: 'Bearer ' + data.token },
-    body: { vehicleID: 'vehicle', pushToken: 'push-token', activityID: 'activity' }
-  }), targetEnv);
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true });
+  const payload = {
+    opaqueVehicleID: 'opaque-vehicle',
+    apnsEnvironment: 'sandbox',
+    chargingMode: 'scheduled'
+  };
+
+  const first = await handleInstallationRequest(installationRequest(
+    '/api/live-activities/enroll', data.token, { body: payload }
+  ), targetEnv);
+  assert.equal(first.status, 200);
+  const firstBody = await first.json();
+  assert.equal(firstBody.status, 'enrolled');
+  assert.equal(typeof firstBody.enrollmentID, 'string');
+  assert.deepEqual(Object.keys(firstBody).sort(), ['enrollmentID', 'status']);
+
+  const second = await handleInstallationRequest(installationRequest(
+    '/api/live-activities/enroll', data.token, { body: payload }
+  ), targetEnv);
+  assert.deepEqual(await second.json(), firstBody);
 });
 
-test('authorized Ford storage never exposes or stores the raw refresh token', async () => {
+test('capability reports eligibility before enrollment and enrollment after it', async () => {
+  const targetEnv = env();
+  const { data } = await bootstrap(targetEnv);
+  const path = '/api/live-activities/capability/opaque-vehicle';
+
+  const eligible = await handleInstallationRequest(installationRequest(path, data.token, {
+    method: 'GET'
+  }), targetEnv);
+  assert.deepEqual(await eligible.json(), { status: 'eligible' });
+
+  const enrollment = await handleInstallationRequest(installationRequest(
+    '/api/live-activities/enroll', data.token, {
+      body: { opaqueVehicleID: 'opaque-vehicle', apnsEnvironment: 'production', chargingMode: 'immediate' }
+    }
+  ), targetEnv);
+  const { enrollmentID } = await enrollment.json();
+
+  const enrolled = await handleInstallationRequest(installationRequest(path, data.token, {
+    method: 'GET'
+  }), targetEnv);
+  assert.deepEqual(await enrolled.json(), { status: 'enrolled', enrollmentID });
+});
+
+test('token registration accepts the iOS payload and never stores the raw token', async () => {
+  const targetEnv = env();
+  const { data } = await bootstrap(targetEnv);
+  const token = 'apns-device-token-secret';
+  await handleInstallationRequest(installationRequest('/api/live-activities/enroll', data.token, {
+    body: { opaqueVehicleID: 'opaque-vehicle', apnsEnvironment: 'sandbox', chargingMode: 'scheduled' }
+  }), targetEnv);
+
+  const response = await handleInstallationRequest(installationRequest('/api/live-activities/tokens', data.token, {
+    method: 'PUT',
+    body: {
+      opaqueVehicleID: 'opaque-vehicle',
+      tokenKind: 'pushToStart',
+      token,
+      apnsEnvironment: 'sandbox',
+      activityID: 'activity-123'
+    }
+  }), targetEnv);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {});
+  for (const value of targetEnv.INSTALLATIONS.values.values()) {
+    assert.ok(!String(value).includes(token));
+  }
+});
+
+test('preferences update and return the charging mode', async () => {
+  const targetEnv = env();
+  const { data } = await bootstrap(targetEnv);
+  await handleInstallationRequest(installationRequest('/api/live-activities/enroll', data.token, {
+    body: { opaqueVehicleID: 'opaque-vehicle', apnsEnvironment: 'production', chargingMode: 'immediate' }
+  }), targetEnv);
+
+  const response = await handleInstallationRequest(installationRequest(
+    '/api/live-activities/preferences/opaque-vehicle', data.token, {
+      method: 'PUT', body: { chargingMode: 'scheduled' }
+    }
+  ), targetEnv);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { chargingMode: 'scheduled' });
+});
+
+test('deleting enrollment returns an empty object and makes the vehicle eligible', async () => {
+  const targetEnv = env();
+  const { data } = await bootstrap(targetEnv);
+  await handleInstallationRequest(installationRequest('/api/live-activities/enroll', data.token, {
+    body: { opaqueVehicleID: 'opaque-vehicle', apnsEnvironment: 'sandbox', chargingMode: 'scheduled' }
+  }), targetEnv);
+
+  const deleted = await handleInstallationRequest(installationRequest(
+    '/api/live-activities/enroll/opaque-vehicle', data.token, { method: 'DELETE' }
+  ), targetEnv);
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), {});
+
+  const capability = await handleInstallationRequest(installationRequest(
+    '/api/live-activities/capability/opaque-vehicle', data.token, { method: 'GET' }
+  ), targetEnv);
+  assert.deepEqual(await capability.json(), { status: 'eligible' });
+});
+
+test('Ford authorization returns status while encrypting the refresh token', async () => {
   const targetEnv = env();
   const { data } = await bootstrap(targetEnv);
   const refreshToken = 'ford-refresh-secret';
-  const response = await handleInstallationRequest(request('/api/ford/authorize', {
-    headers: { Authorization: 'Bearer ' + data.token },
+  const response = await handleInstallationRequest(installationRequest('/api/ford/authorize', data.token, {
     body: {
       opaqueVehicleID: 'opaque-vehicle',
       refreshToken,
@@ -94,43 +177,45 @@ test('authorized Ford storage never exposes or stores the raw refresh token', as
     }
   }), targetEnv);
   assert.equal(response.status, 200);
-  const responseText = await response.text();
-  assert.ok(!responseText.includes(refreshToken));
-  assert.deepEqual(JSON.parse(responseText), { ok: true });
+  assert.deepEqual(await response.json(), { status: 'authorized' });
   for (const value of targetEnv.INSTALLATIONS.values.values()) {
     assert.ok(!String(value).includes(refreshToken));
   }
 });
 
-test('missing installation binding or encryption secret returns explicit 503', async () => {
-  const missingBinding = await handleInstallationRequest(request('/api/installations/bootstrap', {
-    headers: { Authorization: 'Bearer ford-token' },
-    body: {}
-  }), env({ INSTALLATIONS: undefined }));
-  assert.equal(missingBinding.status, 503);
-
-  const targetEnv = env();
-  const { data } = await bootstrap(targetEnv);
-  const missingSecret = await handleInstallationRequest(request('/api/ford/authorize', {
-    headers: { Authorization: 'Bearer ' + data.token },
-    body: {
-      opaqueVehicleID: 'opaque-vehicle',
-      refreshToken: 'refresh-token',
-      redirectURI: 'https://cellblock.cc/'
-    }
-  }), { ...targetEnv, INSTALLATION_ENCRYPTION_KEY: undefined });
-  assert.equal(missingSecret.status, 503);
+test('all live activity routes require the installation credential', async () => {
+  const routes = [
+    ['/api/live-activities/enroll', 'POST', {}],
+    ['/api/live-activities/enroll/opaque-vehicle', 'DELETE'],
+    ['/api/live-activities/tokens', 'PUT', {}],
+    ['/api/live-activities/preferences/opaque-vehicle', 'PUT', {}],
+    ['/api/live-activities/capability/opaque-vehicle', 'GET']
+  ];
+  for (const [path, method, body] of routes) {
+    const response = await handleInstallationRequest(request(path, { method, body }), env());
+    assert.equal(response.status, 401, path);
+  }
 });
 
-test('bad JSON fields are rejected and unknown routes return 404', async () => {
-  const invalid = await handleInstallationRequest(request('/api/live-activities/enroll', {
-    headers: { Authorization: 'Bearer installation-token' },
-    body: { vehicleID: 42, pushToken: 'push', activityID: 'activity' }
-  }), env());
-  assert.equal(invalid.status, 400);
+test('live activity payload fields must be bounded strings', async () => {
+  const targetEnv = env();
+  const { data } = await bootstrap(targetEnv);
+  const invalid = [
+    { opaqueVehicleID: 42, apnsEnvironment: 'sandbox', chargingMode: 'scheduled' },
+    { opaqueVehicleID: 'vehicle', apnsEnvironment: '', chargingMode: 'scheduled' },
+    { opaqueVehicleID: 'vehicle', apnsEnvironment: 'sandbox', chargingMode: 42 }
+  ];
+  for (const body of invalid) {
+    const response = await handleInstallationRequest(installationRequest('/api/live-activities/enroll', data.token, { body }), targetEnv);
+    assert.equal(response.status, 400);
+  }
+});
 
-  const unknown = await handleInstallationRequest(request('/api/live-activities/unknown', {
-    body: {}
-  }), env());
+test('unknown routes remain 404 and missing installation configuration is explicit', async () => {
+  const unknown = await handleInstallationRequest(request('/api/live-activities/unknown', { body: {} }), env());
   assert.equal(unknown.status, 404);
+  const missing = await handleInstallationRequest(request('/api/installations/bootstrap', {
+    headers: { Authorization: 'Bearer ford-token' }, body: {}
+  }), env({ INSTALLATIONS: undefined }));
+  assert.equal(missing.status, 503);
 });

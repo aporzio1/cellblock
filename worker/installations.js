@@ -10,7 +10,7 @@ function corsHeaders(env, request) {
   const matched = allowed.includes('*') ? '*' : (allowed.includes(requestOrigin) ? requestOrigin : allowed[0]);
   return {
     'Access-Control-Allow-Origin': matched,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Vary': 'Origin'
   };
@@ -28,9 +28,9 @@ function configurationError(env, request) {
 }
 
 function hasKv(env) {
-  return env && env.INSTALLATIONS &&
+  return Boolean(env && env.INSTALLATIONS &&
     typeof env.INSTALLATIONS.get === 'function' &&
-    typeof env.INSTALLATIONS.put === 'function';
+    typeof env.INSTALLATIONS.put === 'function');
 }
 
 function parseBearer(request) {
@@ -64,6 +64,11 @@ function stringField(body, name, limit) {
     throw new BadRequest(`${name} must be a non-empty string of at most ${limit} characters`);
   }
   return value;
+}
+
+function optionalStringField(body, name, limit) {
+  if (body[name] === undefined) return undefined;
+  return stringField(body, name, limit);
 }
 
 function base64UrlEncode(bytes) {
@@ -126,7 +131,7 @@ async function installationCredentialFromBearer(env, request) {
   if (!equalStrings(record.tokenHash, tokenHash)) {
     return { error: response(env, request, 401, { error: 'Invalid installation authorization' }) };
   }
-  return { installationID, token, record };
+  return { installationID, record };
 }
 
 async function encryptRefreshToken(refreshToken, encodedKey) {
@@ -164,59 +169,183 @@ async function bootstrap(env, request) {
     tokenHash,
     subjectHash: await sha256(fordToken)
   }));
-  // The index contains no bearer token, only its one-way hash and the random
-  // installation ID needed to find the ownership record.
   await env.INSTALLATIONS.put('credential:' + tokenHash, installationID);
   return response(env, request, 200, { installationID, token });
 }
 
+function vehicleKey(installationID, opaqueVehicleHash) {
+  return `live-activity:${installationID}:${opaqueVehicleHash}`;
+}
+
+async function vehicleHash(body) {
+  return sha256(stringField(body, 'opaqueVehicleID', 512));
+}
+
+function pathIdentifier(pathname, prefix) {
+  if (!pathname.startsWith(prefix)) throw new BadRequest('Invalid route identifier');
+  const encoded = pathname.slice(prefix.length);
+  if (!encoded || encoded.includes('/')) throw new BadRequest('Invalid route identifier');
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    throw new BadRequest('Invalid route identifier');
+  }
+}
+
+async function enrollmentRecord(env, installationID, opaqueVehicleID) {
+  const hash = await sha256(opaqueVehicleID);
+  const key = vehicleKey(installationID, hash);
+  const raw = await env.INSTALLATIONS.get(key);
+  if (!raw) return { hash, key, record: null };
+  try {
+    return { hash, key, record: JSON.parse(raw) };
+  } catch {
+    return { hash, key, record: null };
+  }
+}
+
 async function enroll(env, request) {
   if (!hasKv(env)) return configurationError(env, request);
-  let body;
+  const credential = await installationCredentialFromBearer(env, request);
+  if (credential.error) return credential.error;
   try {
-    body = await readJson(request);
-    const vehicleID = stringField(body, 'vehicleID', 256);
-    const pushToken = stringField(body, 'pushToken', 4096);
-    const activityID = stringField(body, 'activityID', 256);
-    const credential = await installationCredentialFromBearer(env, request);
-    if (credential.error) return credential.error;
-    await env.INSTALLATIONS.put(
-      `live-activity:${credential.installationID}:${await sha256(activityID)}`,
-      JSON.stringify({ subjectHash: credential.record.subjectHash, vehicleID, pushToken, activityID })
-    );
+    const body = await readJson(request);
+    const opaqueVehicleID = stringField(body, 'opaqueVehicleID', 512);
+    const apnsEnvironment = stringField(body, 'apnsEnvironment', 64);
+    const chargingMode = stringField(body, 'chargingMode', 64);
+    const existing = await enrollmentRecord(env, credential.installationID, opaqueVehicleID);
+    const enrollmentID = existing.record?.enrollmentID || crypto.randomUUID();
+    await env.INSTALLATIONS.put(existing.key, JSON.stringify({
+      subjectHash: credential.record.subjectHash,
+      opaqueVehicleIDHash: existing.hash,
+      apnsEnvironment,
+      chargingMode,
+      enrollmentID
+    }));
+    return response(env, request, 200, { status: 'enrolled', enrollmentID });
   } catch (error) {
     if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });
     throw error;
   }
-  return response(env, request, 200, { ok: true });
+}
+
+async function deleteEnrollment(env, request, pathname) {
+  if (!hasKv(env)) return configurationError(env, request);
+  const credential = await installationCredentialFromBearer(env, request);
+  if (credential.error) return credential.error;
+  try {
+    const opaqueVehicleID = stringField(
+      { opaqueVehicleID: pathIdentifier(pathname, '/api/live-activities/enroll/') },
+      'opaqueVehicleID',
+      512
+    );
+    const hash = await sha256(opaqueVehicleID);
+    if (typeof env.INSTALLATIONS.delete !== 'function') return configurationError(env, request);
+    await env.INSTALLATIONS.delete(vehicleKey(credential.installationID, hash));
+    return response(env, request, 200, {});
+  } catch (error) {
+    if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });
+    throw error;
+  }
+}
+
+async function registerToken(env, request) {
+  if (!hasKv(env)) return configurationError(env, request);
+  const credential = await installationCredentialFromBearer(env, request);
+  if (credential.error) return credential.error;
+  try {
+    const body = await readJson(request);
+    const opaqueVehicleID = stringField(body, 'opaqueVehicleID', 512);
+    const tokenKind = stringField(body, 'tokenKind', 128);
+    const token = stringField(body, 'token', 4096);
+    const apnsEnvironment = stringField(body, 'apnsEnvironment', 64);
+    const activityID = optionalStringField(body, 'activityID', 256);
+    const opaqueVehicleHash = await sha256(opaqueVehicleID);
+    await env.INSTALLATIONS.put(
+      `live-activity-token:${credential.installationID}:${opaqueVehicleHash}:${await sha256(tokenKind)}`,
+      JSON.stringify({
+        subjectHash: credential.record.subjectHash,
+        tokenHash: await sha256(token),
+        tokenKind,
+        apnsEnvironment,
+        ...(activityID === undefined ? {} : { activityID })
+      })
+    );
+    return response(env, request, 200, {});
+  } catch (error) {
+    if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });
+    throw error;
+  }
+}
+
+async function updatePreferences(env, request, pathname) {
+  if (!hasKv(env)) return configurationError(env, request);
+  const credential = await installationCredentialFromBearer(env, request);
+  if (credential.error) return credential.error;
+  try {
+    const opaqueVehicleID = stringField(
+      { opaqueVehicleID: pathIdentifier(pathname, '/api/live-activities/preferences/') },
+      'opaqueVehicleID',
+      512
+    );
+    const chargingMode = stringField(await readJson(request), 'chargingMode', 64);
+    const existing = await enrollmentRecord(env, credential.installationID, opaqueVehicleID);
+    if (!existing.record) return response(env, request, 404, { error: 'Enrollment not found' });
+    await env.INSTALLATIONS.put(existing.key, JSON.stringify({
+      ...existing.record,
+      chargingMode
+    }));
+    return response(env, request, 200, { chargingMode });
+  } catch (error) {
+    if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });
+    throw error;
+  }
+}
+
+async function capability(env, request, pathname) {
+  if (!hasKv(env)) return configurationError(env, request);
+  const credential = await installationCredentialFromBearer(env, request);
+  if (credential.error) return credential.error;
+  try {
+    const opaqueVehicleID = stringField(
+      { opaqueVehicleID: pathIdentifier(pathname, '/api/live-activities/capability/') },
+      'opaqueVehicleID',
+      512
+    );
+    const existing = await enrollmentRecord(env, credential.installationID, opaqueVehicleID);
+    return existing.record?.enrollmentID
+      ? response(env, request, 200, { status: 'enrolled', enrollmentID: existing.record.enrollmentID })
+      : response(env, request, 200, { status: 'eligible' });
+  } catch (error) {
+    if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });
+    throw error;
+  }
 }
 
 async function authorize(env, request) {
   if (!hasKv(env)) return configurationError(env, request);
-  let body;
+  const credential = await installationCredentialFromBearer(env, request);
+  if (credential.error) return credential.error;
   try {
-    body = await readJson(request);
+    const body = await readJson(request);
     const opaqueVehicleID = stringField(body, 'opaqueVehicleID', 512);
     const refreshToken = stringField(body, 'refreshToken', 4096);
     const redirectURI = stringField(body, 'redirectURI', 2048);
-    if (redirectURI !== REGISTERED_REDIRECT_URI) {
-      throw new BadRequest('Invalid redirectURI');
-    }
-    const credential = await installationCredentialFromBearer(env, request);
-    if (credential.error) return credential.error;
+    if (redirectURI !== REGISTERED_REDIRECT_URI) throw new BadRequest('Invalid redirectURI');
     if (typeof env.INSTALLATION_ENCRYPTION_KEY !== 'string' || env.INSTALLATION_ENCRYPTION_KEY.length === 0) {
       return response(env, request, 503, { error: 'Installation encryption is not configured' });
     }
-    const encryptedRefreshToken = await encryptRefreshToken(refreshToken, env.INSTALLATION_ENCRYPTION_KEY);
+    const refreshTokenCiphertext = await encryptRefreshToken(refreshToken, env.INSTALLATION_ENCRYPTION_KEY);
     await env.INSTALLATIONS.put(
       `ford-authorization:${credential.installationID}`,
       JSON.stringify({
         subjectHash: credential.record.subjectHash,
-        opaqueVehicleID,
+        opaqueVehicleIDHash: await sha256(opaqueVehicleID),
         redirectURI,
-        refreshTokenCiphertext: encryptedRefreshToken
+        refreshTokenCiphertext
       })
     );
+    return response(env, request, 200, { status: 'authorized' });
   } catch (error) {
     if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });
     if (error instanceof Error && error.message === 'Invalid encryption key') {
@@ -224,25 +353,38 @@ async function authorize(env, request) {
     }
     throw error;
   }
-  return response(env, request, 200, { ok: true });
 }
 
 export async function handleInstallationRequest(request, env) {
   const { pathname } = new URL(request.url);
   const installationRoute = pathname === '/api/installations/bootstrap';
   const enrollmentRoute = pathname === '/api/live-activities/enroll';
+  const deleteEnrollmentRoute = pathname.startsWith('/api/live-activities/enroll/');
+  const tokenRoute = pathname === '/api/live-activities/tokens';
+  const preferencesRoute = pathname.startsWith('/api/live-activities/preferences/');
+  const capabilityRoute = pathname.startsWith('/api/live-activities/capability/');
   const authorizationRoute = pathname === '/api/ford/authorize';
-  const scopedRoute = installationRoute || enrollmentRoute || authorizationRoute ||
-    pathname.startsWith('/api/installations/') ||
-    pathname.startsWith('/api/live-activities/') ||
+  const scopedRoute = installationRoute || enrollmentRoute || deleteEnrollmentRoute || tokenRoute ||
+    preferencesRoute || capabilityRoute || authorizationRoute ||
+    pathname.startsWith('/api/installations/') || pathname.startsWith('/api/live-activities/') ||
     pathname.startsWith('/api/ford/');
 
   if (!scopedRoute) return null;
-  if (request.method !== 'POST') return response(env, request, 404, { error: 'Not found' });
+  if ((installationRoute || enrollmentRoute || authorizationRoute) && request.method !== 'POST') {
+    return response(env, request, 404, { error: 'Not found' });
+  }
+  if (deleteEnrollmentRoute && request.method !== 'DELETE') return response(env, request, 404, { error: 'Not found' });
+  if (tokenRoute && request.method !== 'PUT') return response(env, request, 404, { error: 'Not found' });
+  if (preferencesRoute && request.method !== 'PUT') return response(env, request, 404, { error: 'Not found' });
+  if (capabilityRoute && request.method !== 'GET') return response(env, request, 404, { error: 'Not found' });
 
   try {
     if (installationRoute) return bootstrap(env, request);
     if (enrollmentRoute) return enroll(env, request);
+    if (deleteEnrollmentRoute) return deleteEnrollment(env, request, pathname);
+    if (tokenRoute) return registerToken(env, request);
+    if (preferencesRoute) return updatePreferences(env, request, pathname);
+    if (capabilityRoute) return capability(env, request, pathname);
     if (authorizationRoute) return authorize(env, request);
     return response(env, request, 404, { error: 'Not found' });
   } catch {
