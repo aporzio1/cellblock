@@ -7,6 +7,11 @@ bindings = [
   { name = "FORD_RATE_LIMITER", class_name = "FordRateLimiter" }
 ]
 
+[[kv_namespaces]]
+# Replace this placeholder with the ID returned by the provisioning command below.
+binding = "INSTALLATIONS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["FordRateLimiter"]
@@ -18,3 +23,9 @@ ALLOWED_ORIGIN = "https://cellblock.cc,https://proxy.cellblock.cc"
 # Secrets (set once, stored by Cloudflare, never in this repo):
 #   npx wrangler secret put CLIENT_ID
 #   npx wrangler secret put CLIENT_SECRET
+#   npx wrangler secret put INSTALLATION_ENCRYPTION_KEY
+#
+# Provision the installation KV namespace, then replace the placeholder ID above:
+#   npx wrangler kv namespace create INSTALLATIONS
+# Generate a 32-byte base64 key without printing it:
+#   openssl rand -base64 32 | npx wrangler secret put INSTALLATION_ENCRYPTION_KEY
