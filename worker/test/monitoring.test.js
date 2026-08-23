@@ -110,7 +110,7 @@ test('scheduled monitoring emits one APNs start and dedupes the next minute poll
   };
   await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 1_000_000 });
   await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 1_000_030 });
-  assert.equal(calls.filter(call => call.url.includes('/telemetry')).length, 1);
+  assert.equal(calls.filter(call => call.url.includes('/telemetry')).length, 2);
   const apns = calls.find(call => call.url.includes('push.apple.com'));
   assert.match(apns.options.headers.authorization, /^bearer /);
   assert.equal(apns.options.headers['apns-push-type'], 'liveactivity');
@@ -118,6 +118,29 @@ test('scheduled monitoring emits one APNs start and dedupes the next minute poll
   assert.equal(JSON.parse(apns.options.body).aps.event, 'start');
   const stored = JSON.parse(await targetEnv.INSTALLATIONS.get(`ford-authorization:${installationID}`));
   assert.equal(stored.lastState.charging, true);
+});
+
+test('steady noncharging telemetry causes no authorization KV puts after initialization', async () => {
+  const { targetEnv } = await enrolledEnvironment('home');
+  const originalPut = targetEnv.INSTALLATIONS.put.bind(targetEnv.INSTALLATIONS);
+  let puts = 0;
+  targetEnv.INSTALLATIONS.put = async (...args) => { puts += 1; return originalPut(...args); };
+  const fakeFetch = async (url) => {
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }), { status: 200 });
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({
+      timestamp: '2026-08-22T15:00:00Z', metrics: {
+        xevBatteryChargeDisplayStatus: { value: 'NOT_CHARGING' },
+        xevPlugChargerStatus: { value: 'UNPLUGGED' },
+        xevBatteryStateOfCharge: { value: 40 }
+      }
+    }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  };
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 4_000_000 });
+  assert.equal(puts, 1);
+  puts = 0;
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 4_060_000 });
+  assert.equal(puts, 0);
 });
 
 test('fast mode gates telemetry below 25kW', async () => {

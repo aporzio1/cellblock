@@ -190,10 +190,7 @@ async function sendAPNs(env, environment, token, event, telemetry, state, now, f
 async function monitorAuthorization(env, key, record, fetchImpl, now) {
   const installationID = key.slice('ford-authorization:'.length);
   if (record?.status === 'reauthorizationRequired') return;
-  if (Number.isFinite(record?.lastPollAt) && now - record.lastPollAt < 60_000) return;
   if (!record?.refreshTokenCiphertext || !record?.vinCiphertext || !record?.opaqueVehicleIDHash) return;
-  await updateAuthorization(env, key, record, { lastPollAt: now });
-  record = { ...record, lastPollAt: now };
   let refreshToken;
   let vin;
   try {
@@ -245,7 +242,9 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
       (telemetry.etaMinutes !== null && telemetry.etaMinutes !== previous.etaMinutes));
   const event = started ? 'start' : ended ? 'end' : meaningfulUpdate ? 'update' : null;
   const nextState = { ...current, startedAt: started ? new Date(now).toISOString() : previous.startedAt };
-  await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp });
+  if (!record.lastState || event) {
+    await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp });
+  }
   if (!event) return;
   const kind = event === 'start' ? 'pushToStart' : 'activity';
   const tokenRaw = await env.INSTALLATIONS.get(await tokenKey(installationID, record.opaqueVehicleIDHash, kind));
