@@ -91,7 +91,8 @@ export function decodeTelemetry(body) {
 function modeAllowsCharging(mode, telemetry) {
   if (!telemetry.charging) return false;
   if (mode === 'fast') return telemetry.powerKW !== null && telemetry.powerKW >= FAST_CHARGING_POWER_KW;
-  return mode === 'home' || mode === 'allAC' || mode === 'both' || !mode;
+  if (mode === 'allAC' || mode === 'home') return telemetry.powerKW !== null && telemetry.powerKW < FAST_CHARGING_POWER_KW;
+  return mode === 'both' || !mode;
 }
 
 function installationKey(id) { return `ford-authorization:${id}`; }

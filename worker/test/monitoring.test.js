@@ -137,6 +137,23 @@ test('fast mode gates telemetry below 25kW', async () => {
   assert.equal(apnsCalls, 0);
 });
 
+test('allAC mode gates telemetry at or above 25kW', async () => {
+  const { targetEnv } = await enrolledEnvironment('allAC');
+  let apnsCalls = 0;
+  const fakeFetch = async (url) => {
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }), { status: 200 });
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({ metrics: {
+      xevBatteryChargeDisplayStatus: { value: 'CHARGING' },
+      xevBatteryChargerVoltageOutput: { value: 400 }, xevBatteryChargerCurrentOutput: { value: 62.5 },
+      xevBatteryStateOfCharge: { value: 40 }
+    } }), { status: 200 });
+    apnsCalls += 1;
+    return new Response('{}', { status: 200 });
+  };
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 2_500_000 });
+  assert.equal(apnsCalls, 0);
+});
+
 test('invalid Ford grant marks authorization for reauthorization', async () => {
   const { targetEnv } = await enrolledEnvironment('home');
   await runScheduledMonitoring(targetEnv, {
