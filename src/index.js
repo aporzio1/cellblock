@@ -128,6 +128,19 @@ function validateVehicleID(value) {
 function validateEnvironment(value) { return value === "sandbox" || value === "production"; }
 function validateMode(value) { return value === "fast" || value === "allAC" || value === "both"; }
 
+function garageVINs(garage) {
+  const vins = new Set();
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    for (const [key, item] of Object.entries(value)) {
+      if (key.toLowerCase() === "vin" && typeof item === "string") vins.add(item.toUpperCase());
+      else if (item && typeof item === "object") visit(item);
+    }
+  };
+  visit(garage);
+  return [...vins];
+}
+
 async function bootstrap(request, env) {
   // Bootstrap accepts a current Ford access token only as a one-time proof.
   // It is used to fetch the garage; the Worker stores neither it nor a Ford
@@ -141,14 +154,7 @@ async function bootstrap(request, env) {
   });
   if (!fordCheck.ok) return json({ error: "Ford authorization required" }, 401);
   const garage = await fordCheck.json().catch(() => null);
-  const entries = [
-    ...(Array.isArray(garage?.vehicles) ? garage.vehicles : []),
-    ...(Array.isArray(garage?.data) ? garage.data : [])
-  ];
-  const vins = [...new Set([
-    ...(typeof garage?.vin === "string" ? [garage.vin] : []),
-    ...entries.map((vehicle) => vehicle?.vin).filter((vin) => typeof vin === "string")
-  ])];
+  const vins = garageVINs(garage);
   const expectedVehicleIDs = await Promise.all(vins.map((vin) => sha256(vin.toUpperCase()).then((hash) => `v1-${hash.slice(0, 32)}`)));
   if (!expectedVehicleIDs.includes(body.opaqueVehicleID)) return json({ error: "Vehicle authorization required" }, 403);
   const installationID = id();
@@ -208,16 +214,10 @@ async function authorizeFord(request, env, principal) {
     headers: { Authorization: `Bearer ${exchanged.payload.access_token}`, Accept: "application/json" }
   });
   const garage = await garageResponse.json().catch(() => null);
-  const vehicles = [
-    ...(typeof garage?.vin === "string" ? [{ vin: garage.vin }] : []),
-    ...(Array.isArray(garage?.vehicles) ? garage.vehicles : []),
-    ...(Array.isArray(garage?.data) ? garage.data : [])
-  ];
   let matchedVIN = null;
-  for (const vehicle of vehicles) {
-    if (typeof vehicle?.vin !== "string") continue;
-    if (`v1-${(await sha256(vehicle.vin.toUpperCase())).slice(0, 32)}` === body.opaqueVehicleID) {
-      matchedVIN = vehicle.vin.toUpperCase();
+  for (const vin of garageVINs(garage)) {
+    if (`v1-${(await sha256(vin)).slice(0, 32)}` === body.opaqueVehicleID) {
+      matchedVIN = vin;
       break;
     }
   }
