@@ -1,0 +1,27 @@
+name = "cellblock-live-activities"
+main = "src/index.js"
+compatibility_date = "2026-08-21"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cellblock-live-activities"
+database_id = "8e26c471-b531-45b4-92a1-b6b5d5ee99d2"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[durable_objects.bindings]]
+name = "FORD_RATE_LIMITER"
+class_name = "FordRateLimiter"
+
+[exports.FordRateLimiter]
+type = "durable-object"
+storage = "sqlite"
+
+[observability]
+enabled = true
+
+[vars]
+# APNs values are secret bindings; this section intentionally contains no credentials.
+# The Worker reports APNs configuration only when all four bindings exist.

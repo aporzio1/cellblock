@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import { validateVehicleID, validateMode } from './src/index.js';
+assert.equal(validateVehicleID('v1-0123456789abcdef0123456789abcdef'), true);
+assert.equal(validateVehicleID('v1-0123456789abcdef'), false);
+assert.equal(validateVehicleID('1FT6W5L72RWG13441'), false);
+assert.equal(validateMode('fast'), true);
+assert.equal(validateMode('allAC'), true);
+assert.equal(validateMode('both'), true);
+assert.equal(validateMode('home'), false);
+console.log('backend validation tests passed');
