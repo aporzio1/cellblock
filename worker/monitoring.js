@@ -188,6 +188,13 @@ async function sendAPNs(env, environment, token, event, telemetry, state, now, f
 
 async function monitorAuthorization(env, key, record, fetchImpl, now) {
   const installationID = key.slice('ford-authorization:'.length);
+  const storeMonitoringError = async (code, status) => {
+    const previous = record.monitoringError;
+    if (previous?.code === code && previous?.status === status) return;
+    const monitoringError = { code, updatedAt: now };
+    if (status !== undefined) monitoringError.status = status;
+    await updateAuthorization(env, key, record, { monitoringError });
+  };
   if (record?.status === 'reauthorizationRequired') return;
   if (!record?.refreshTokenCiphertext || !record?.vinCiphertext || !record?.opaqueVehicleIDHash) return;
   let refreshToken;
@@ -196,14 +203,14 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
     refreshToken = await decryptValue(record.refreshTokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY);
     vin = await decryptValue(record.vinCiphertext, env.INSTALLATION_ENCRYPTION_KEY);
   } catch {
-    await updateAuthorization(env, key, record, { monitoringError: { code: 'invalidStoredAuthorization', updatedAt: now } });
+    await storeMonitoringError('invalidStoredAuthorization');
     return;
   }
   let accessToken;
   try { accessToken = await exchangeRefreshToken(env, refreshToken, fetchImpl); }
   catch (error) {
     if (error.authorizationExpired) await updateAuthorization(env, key, record, { status: 'reauthorizationRequired' });
-    else await updateAuthorization(env, key, record, { monitoringError: { code: error.retryable ? 'retryableUpstream' : 'tokenExchangeFailed', updatedAt: now } });
+    else await storeMonitoringError(error.retryable ? 'retryableUpstream' : 'tokenExchangeFailed');
     return;
   }
   const telemetryURL = new URL(FORD_TELEMETRY_URL);
@@ -214,16 +221,16 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
     return;
   }
   if (telemetryResponse.status === 429 || telemetryResponse.status >= 500) {
-    await updateAuthorization(env, key, record, { monitoringError: { code: 'retryableUpstream', status: telemetryResponse.status, updatedAt: now } });
+    await storeMonitoringError('retryableUpstream', telemetryResponse.status);
     return;
   }
   if (!telemetryResponse.ok) {
-    await updateAuthorization(env, key, record, { monitoringError: { code: 'telemetryFailed', status: telemetryResponse.status, updatedAt: now } });
+    await storeMonitoringError('telemetryFailed', telemetryResponse.status);
     return;
   }
   let body;
   try { body = await telemetryResponse.json(); } catch {
-    await updateAuthorization(env, key, record, { monitoringError: { code: 'invalidTelemetry', updatedAt: now } });
+    await storeMonitoringError('invalidTelemetry');
     return;
   }
   const telemetry = decodeTelemetry(body);
