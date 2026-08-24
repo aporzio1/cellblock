@@ -207,12 +207,13 @@ async function authorizeFord(request, env, principal) {
     refresh_token: body.refreshToken,
     redirect_uri: body.redirectURI || FORD_REDIRECT_URI
   });
-  if (!exchanged.response.ok || !exchanged.payload?.access_token || !exchanged.payload?.refresh_token) {
+  if (!exchanged.response.ok || !exchanged.payload?.access_token) {
     return json({ error: "Ford reauthorization required" }, 401);
   }
   const garageResponse = await fetch(`${FORD_DATA_BASE}/garage`, {
     headers: { Authorization: `Bearer ${exchanged.payload.access_token}`, Accept: "application/json" }
   });
+  if (!garageResponse.ok) return json({ error: "Ford vehicle lookup failed" }, 502);
   const garage = await garageResponse.json().catch(() => null);
   let matchedVIN = null;
   for (const vin of garageVINs(garage)) {
@@ -222,6 +223,7 @@ async function authorizeFord(request, env, principal) {
     }
   }
   if (!matchedVIN) return json({ error: "Vehicle authorization required" }, 403);
+  const rotatedRefreshToken = exchanged.payload.refresh_token || body.refreshToken;
   const timestamp = nowISO();
   const accountID = `ford-${principal.installation_id}`;
   await env.DB.prepare(`INSERT INTO ford_accounts
@@ -230,7 +232,7 @@ async function authorizeFord(request, env, principal) {
       ON CONFLICT(ford_account_id) DO UPDATE SET
         refresh_token_ciphertext=excluded.refresh_token_ciphertext,
         token_expires_at=excluded.token_expires_at, status='active', updated_at=excluded.updated_at`)
-    .bind(accountID, principal.installation_id, await encrypt(exchanged.payload.refresh_token, env),
+    .bind(accountID, principal.installation_id, await encrypt(rotatedRefreshToken, env),
       exchanged.payload.refresh_token_expires_in ? new Date(Date.now() + exchanged.payload.refresh_token_expires_in * 1000).toISOString() : null,
       timestamp, timestamp).run();
   await env.DB.prepare(`UPDATE enrollments SET vehicle_ciphertext=?, updated_at=?
