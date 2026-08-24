@@ -188,9 +188,9 @@ async function bootstrap(request, env) {
   const tokenHash = await sha256(token);
   const timestamp = nowISO();
   await env.DB.prepare(`INSERT INTO installations
-      (installation_id, auth_token_hash, created_at, updated_at)
-      VALUES (?, ?, ?, ?)`)
-    .bind(installationID, tokenHash, timestamp, timestamp).run();
+      (installation_id, auth_token_hash, verified_opaque_vehicle_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)`)
+    .bind(installationID, tokenHash, body.opaqueVehicleID, timestamp, timestamp).run();
   await recordBootstrapResult(env, "authorized", fordCheck.status);
   return json({ installationID, token });
 }
@@ -226,9 +226,12 @@ async function authorizeFord(request, env, principal) {
       || !validateVehicleID(body.opaqueVehicleID)) {
     return json({ error: "Invalid Ford authorization" }, 400);
   }
-  const existing = await env.DB.prepare("SELECT enrollment_id FROM enrollments WHERE installation_id=? AND opaque_vehicle_id=? AND status='enrolled'")
+  const existing = await env.DB.prepare(`SELECT e.enrollment_id FROM enrollments e
+      JOIN installations i ON i.installation_id=e.installation_id
+      WHERE e.installation_id=? AND e.opaque_vehicle_id=? AND e.status='enrolled'
+        AND i.verified_opaque_vehicle_id=e.opaque_vehicle_id`)
     .bind(principal.installation_id, body.opaqueVehicleID).first();
-  if (!existing) return json({ error: "Not enrolled" }, 409);
+  if (!existing) return json({ error: "Not enrolled or bootstrap verification expired" }, 409);
   const exchanged = await fordTokenExchange(env, {
     grant_type: "refresh_token",
     refresh_token: body.refreshToken,
@@ -238,26 +241,10 @@ async function authorizeFord(request, env, principal) {
     await recordFordAuthorizationResult(env, "tokenExchangeRejected", exchanged.response.status);
     return json({ error: "Ford reauthorization required" }, 401);
   }
-  const garageResponse = await fetch(`${FORD_DATA_BASE}/garage`, {
-    headers: { Authorization: `Bearer ${exchanged.payload.access_token}`, Accept: "application/json" }
-  });
-  if (!garageResponse.ok) {
-    await recordFordAuthorizationResult(env, "garageRejected", garageResponse.status);
-    return json({ error: "Ford vehicle lookup failed" }, 502);
-  }
-  const garage = await garageResponse.json().catch(() => null);
-  let matchedVIN = null;
-  for (const vin of garageVINs(garage)) {
-    const normalizedVIN = vin.toUpperCase();
-    if (`v1-${(await sha256(normalizedVIN)).slice(0, 32)}` === body.opaqueVehicleID) {
-      matchedVIN = normalizedVIN;
-      break;
-    }
-  }
-  if (!matchedVIN) {
-    await recordFordAuthorizationResult(env, "vehicleNotMatched", garageResponse.status);
-    return json({ error: "Vehicle authorization required" }, 403);
-  }
+  // Bootstrap already verified this opaque vehicle against Ford's garage with
+  // the current foreground access token. Repeating that request immediately
+  // trips Ford's rate limiter, so authorization relies on the bound bootstrap
+  // credential and only exchanges the explicitly handed-off refresh token.
   const rotatedRefreshToken = exchanged.payload.refresh_token || body.refreshToken;
   const timestamp = nowISO();
   const accountID = `ford-${principal.installation_id}`;
@@ -272,8 +259,8 @@ async function authorizeFord(request, env, principal) {
       timestamp, timestamp).run();
   await env.DB.prepare(`UPDATE enrollments SET vehicle_ciphertext=?, updated_at=?
       WHERE installation_id=? AND opaque_vehicle_id=? AND status='enrolled'`)
-    .bind(await encrypt(matchedVIN, env), timestamp, principal.installation_id, body.opaqueVehicleID).run();
-  await recordFordAuthorizationResult(env, "authorized", garageResponse.status);
+    .bind(null, timestamp, principal.installation_id, body.opaqueVehicleID).run();
+  await recordFordAuthorizationResult(env, "authorized", exchanged.response.status);
   return json({ status: "authorized" });
 }
 

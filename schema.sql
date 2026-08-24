@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS installations (
   installation_id TEXT PRIMARY KEY,
   auth_token_hash TEXT NOT NULL UNIQUE,
+  verified_opaque_vehicle_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   revoked_at TEXT
