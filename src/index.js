@@ -6,6 +6,13 @@ function json(body, status = 200) {
 
 function nowISO() { return new Date().toISOString(); }
 
+async function recordBootstrapResult(env, category, upstreamStatus = null) {
+  const timestamp = nowISO();
+  await env.DB.prepare(`INSERT INTO service_state(key, value, updated_at) VALUES ('last_bootstrap', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`)
+    .bind(JSON.stringify({ category, upstreamStatus }), timestamp).run();
+}
+
 async function recordFordAuthorizationResult(env, category, upstreamStatus = null) {
   const timestamp = nowISO();
   await env.DB.prepare(`INSERT INTO service_state(key, value, updated_at) VALUES ('last_ford_authorization', ?, ?)
@@ -153,17 +160,29 @@ async function bootstrap(request, env) {
   // It is used to fetch the garage; the Worker stores neither it nor a Ford
   // refresh token. The opaque vehicle ID must match a VIN returned by Ford.
   const fordToken = bearer(request);
-  if (!fordToken) return json({ error: "Unauthorized" }, 401);
+  if (!fordToken) {
+    await recordBootstrapResult(env, "missingBearer");
+    return json({ error: "Unauthorized" }, 401);
+  }
   const body = await request.json().catch(() => null);
-  if (!body || !validateVehicleID(body.opaqueVehicleID)) return json({ error: "Invalid opaqueVehicleID" }, 400);
+  if (!body || !validateVehicleID(body.opaqueVehicleID)) {
+    await recordBootstrapResult(env, "invalidVehicleID");
+    return json({ error: "Invalid opaqueVehicleID" }, 400);
+  }
   const fordCheck = await fetch("https://api.vehicle.ford.com/fcon-query/v1/garage", {
     headers: { Authorization: `Bearer ${fordToken}`, Accept: "application/json" }
   });
-  if (!fordCheck.ok) return json({ error: "Ford authorization required" }, 401);
+  if (!fordCheck.ok) {
+    await recordBootstrapResult(env, "garageRejected", fordCheck.status);
+    return json({ error: "Ford authorization required" }, 401);
+  }
   const garage = await fordCheck.json().catch(() => null);
   const vins = garageVINs(garage);
   const expectedVehicleIDs = await Promise.all(vins.map((vin) => sha256(vin.toUpperCase()).then((hash) => `v1-${hash.slice(0, 32)}`)));
-  if (!expectedVehicleIDs.includes(body.opaqueVehicleID)) return json({ error: "Vehicle authorization required" }, 403);
+  if (!expectedVehicleIDs.includes(body.opaqueVehicleID)) {
+    await recordBootstrapResult(env, "vehicleNotMatched", fordCheck.status);
+    return json({ error: "Vehicle authorization required" }, 403);
+  }
   const installationID = id();
   const token = `${id()}${id()}`.replaceAll("-", "");
   const tokenHash = await sha256(token);
@@ -172,6 +191,7 @@ async function bootstrap(request, env) {
       (installation_id, auth_token_hash, created_at, updated_at)
       VALUES (?, ?, ?, ?)`)
     .bind(installationID, tokenHash, timestamp, timestamp).run();
+  await recordBootstrapResult(env, "authorized", fordCheck.status);
   return json({ installationID, token });
 }
 
