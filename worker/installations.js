@@ -1,6 +1,7 @@
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_AUTHORIZATION_BYTES = 8 * 1024;
 const REGISTERED_REDIRECT_URI = 'https://cellblock.cc/';
+const AUTHORIZATION_INDEX_KEY = 'ford-authorization-index';
 import { encryptValue, validateVIN } from './monitoring.js';
 
 class BadRequest extends Error {}
@@ -342,8 +343,9 @@ async function authorize(env, request) {
     }
     const refreshTokenCiphertext = await encryptRefreshToken(refreshToken, env.INSTALLATION_ENCRYPTION_KEY);
     const vinCiphertext = await encryptValue(vin, env.INSTALLATION_ENCRYPTION_KEY);
+    const authorizationKey = `ford-authorization:${credential.installationID}`;
     await env.INSTALLATIONS.put(
-      `ford-authorization:${credential.installationID}`,
+      authorizationKey,
       JSON.stringify({
         subjectHash: credential.record.subjectHash,
         opaqueVehicleIDHash: await sha256(opaqueVehicleID),
@@ -353,6 +355,17 @@ async function authorize(env, request) {
         status: 'authorized'
       })
     );
+    let authorizationKeys = [];
+    try {
+      authorizationKeys = JSON.parse(await env.INSTALLATIONS.get(AUTHORIZATION_INDEX_KEY) || '[]');
+    } catch {
+      authorizationKeys = [];
+    }
+    if (!Array.isArray(authorizationKeys)) authorizationKeys = [];
+    if (!authorizationKeys.includes(authorizationKey)) {
+      authorizationKeys.push(authorizationKey);
+      await env.INSTALLATIONS.put(AUTHORIZATION_INDEX_KEY, JSON.stringify(authorizationKeys));
+    }
     return response(env, request, 200, { status: 'authorized' });
   } catch (error) {
     if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });

@@ -1,8 +1,7 @@
 const FORD_TOKEN_URL = 'https://api.vehicle.ford.com/dah2vb2cprod.onmicrosoft.com/oauth2/v2.0/token?p=B2C_1A_FCON_AUTHORIZE';
 const FORD_TELEMETRY_URL = 'https://api.vehicle.ford.com/fcon-query/v1/telemetry';
 const REGISTERED_REDIRECT_URI = 'https://cellblock.cc/';
-const PAGE_SIZE = 50;
-const MAX_PAGES = 20;
+const AUTHORIZATION_INDEX_KEY = 'ford-authorization-index';
 const MIN_CHARGING_POWER_KW = 0.5;
 const FAST_CHARGING_POWER_KW = 25;
 
@@ -262,19 +261,21 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
 export async function runScheduledMonitoring(env, options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const now = options.now || Date.now();
-  if (!env?.INSTALLATIONS || typeof env.INSTALLATIONS.list !== 'function') return;
-  let cursor;
-  for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
-    const page = await env.INSTALLATIONS.list({ prefix: 'ford-authorization:', limit: PAGE_SIZE, ...(cursor ? { cursor } : {}) });
-    for (const entry of page.keys || []) {
-      try {
-        const raw = await env.INSTALLATIONS.get(entry.name);
-        if (raw) await monitorAuthorization(env, entry.name, JSON.parse(raw), fetchImpl, now);
-      } catch {
-        // A bad record must not prevent the remaining installations from running.
-      }
+  if (!env?.INSTALLATIONS || typeof env.INSTALLATIONS.get !== 'function') return;
+  let keys;
+  try {
+    keys = JSON.parse(await env.INSTALLATIONS.get(AUTHORIZATION_INDEX_KEY) || '[]');
+  } catch {
+    keys = [];
+  }
+  if (!Array.isArray(keys)) return;
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key.startsWith('ford-authorization:')) continue;
+    try {
+      const raw = await env.INSTALLATIONS.get(key);
+      if (raw) await monitorAuthorization(env, key, JSON.parse(raw), fetchImpl, now);
+    } catch {
+      // A bad record must not prevent the remaining installations from running.
     }
-    if (page.list_complete || !page.cursor) break;
-    cursor = page.cursor;
   }
 }
