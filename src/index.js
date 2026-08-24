@@ -182,7 +182,7 @@ async function enroll(request, env, principal) {
       ON CONFLICT(installation_id, opaque_vehicle_id) DO UPDATE SET
         apns_environment=excluded.apns_environment,
         charging_mode=excluded.charging_mode,
-        status='enrolled', revoked_at=NULL, updated_at=excluded.updated_at`)
+        vehicle_ciphertext=NULL, status='enrolled', revoked_at=NULL, updated_at=excluded.updated_at`)
     .bind(enrollmentID, principal.installation_id, body.opaqueVehicleID, body.apnsEnvironment, mode, timestamp, timestamp).run();
   const row = await env.DB.prepare("SELECT enrollment_id FROM enrollments WHERE installation_id=? AND opaque_vehicle_id=?")
     .bind(principal.installation_id, body.opaqueVehicleID).first();
@@ -252,8 +252,19 @@ async function capability(env, principal, opaqueVehicleID) {
 
 async function revoke(env, principal, opaqueVehicleID) {
   const timestamp = nowISO();
-  await env.DB.prepare(`UPDATE enrollments SET status='revoked', revoked_at=?, updated_at=?
-    WHERE installation_id=? AND opaque_vehicle_id=?`).bind(timestamp, timestamp, principal.installation_id, opaqueVehicleID).run();
+  const enrollment = await env.DB.prepare(`SELECT enrollment_id FROM enrollments
+    WHERE installation_id=? AND opaque_vehicle_id=? AND revoked_at IS NULL`)
+    .bind(principal.installation_id, opaqueVehicleID).first();
+  if (!enrollment) return json({ error: "Not enrolled" }, 409);
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE enrollments SET status='revoked', revoked_at=?, vehicle_ciphertext=NULL, updated_at=?
+      WHERE enrollment_id=?`).bind(timestamp, timestamp, enrollment.enrollment_id),
+    env.DB.prepare(`UPDATE activity_tokens SET invalidated_at=?, updated_at=? WHERE enrollment_id=? AND invalidated_at IS NULL`)
+      .bind(timestamp, timestamp, enrollment.enrollment_id),
+    env.DB.prepare(`UPDATE vehicle_poll_state SET next_poll_at=NULL, last_source_updated_at=NULL, charge_phase='unknown',
+      last_session_id=NULL, session_started_at=NULL, updated_at=? WHERE enrollment_id=?`)
+      .bind(timestamp, enrollment.enrollment_id)
+  ]);
   return json({});
 }
 
@@ -360,7 +371,7 @@ async function status(env) {
       bundleID: Boolean(env.APNS_BUNDLE_ID)
     },
     scheduler: lastTick ? "active" : "notObserved",
-    lastCronTick: lastTick ? { at: lastTick.updated_at, ...(JSON.parse(lastTick.value || "{}")) } : null,
+    lastCronTick: lastTick ? { at: lastTick.updated_at, ...safeJSON(lastTick.value) } : null,
     backgroundPolling: enrolledVehicles > 0 && fordAuthorizations > 0 ? "active" : "waitingForEnrollment"
   });
 }
@@ -382,6 +393,10 @@ async function fetchHandler(request, env) {
   if (request.method === "PUT" && preferenceMatch) return preferences(request, env, principal, decodeURIComponent(preferenceMatch[1]));
   if (request.method === "POST" && url.pathname === "/api/live-activities/test") return testLiveActivity(request, env, principal);
   return json({ error: "Not found" }, 404);
+}
+
+function safeJSON(value) {
+  try { return JSON.parse(value || "{}"); } catch { return {}; }
 }
 
 function toNumber(value) {
@@ -436,7 +451,7 @@ function sessionEvent(previousPhase, phase) {
 async function pollDue(env) {
   const now = new Date();
   const rows = await env.DB.prepare(`SELECT e.enrollment_id, e.opaque_vehicle_id, e.apns_environment, e.charging_mode,
-      e.vehicle_ciphertext, p.next_poll_at, p.charge_phase, p.last_source_updated_at,
+      e.vehicle_ciphertext, p.next_poll_at, p.charge_phase, p.last_source_updated_at, p.last_session_id,
       f.refresh_token_ciphertext, f.ford_account_id
       FROM enrollments e JOIN vehicle_poll_state p ON p.enrollment_id=e.enrollment_id
       JOIN installations i ON i.installation_id=e.installation_id AND i.revoked_at IS NULL
@@ -466,7 +481,7 @@ async function pollDue(env) {
       await env.DB.prepare(`UPDATE vehicle_poll_state SET next_poll_at=?, last_source_updated_at=?, charge_phase=?, last_soc=?, last_power_kw=?, last_session_id=?, session_started_at=COALESCE(session_started_at, ?), consecutive_qualifying=0, consecutive_nonqualifying=0, updated_at=? WHERE enrollment_id=?`)
         .bind(new Date(Date.now() + intervalMinutes * 60000).toISOString(), sourceAt.toISOString(), phase, soc, powerKW, sessionID, event === "start" ? sourceAt.toISOString() : null, nowISO(), row.enrollment_id).run();
       await env.DB.prepare("UPDATE ford_accounts SET refresh_token_ciphertext=?, token_expires_at=?, updated_at=? WHERE ford_account_id=?")
-        .bind(await encrypt(exchanged.payload.refresh_token, env), exchanged.payload.refresh_token_expires_in ? new Date(Date.now() + exchanged.payload.refresh_token_expires_in * 1000).toISOString() : null, nowISO(), row.ford_account_id).run();
+        .bind(await encrypt(exchanged.payload.refresh_token || refreshToken, env), exchanged.payload.refresh_token_expires_in ? new Date(Date.now() + exchanged.payload.refresh_token_expires_in * 1000).toISOString() : null, nowISO(), row.ford_account_id).run();
       const tokenRows = await env.DB.prepare(`SELECT token_ciphertext, apns_environment, token_kind, activity_id
           FROM activity_tokens WHERE enrollment_id=? AND invalidated_at IS NULL`).bind(row.enrollment_id).all();
       for (const tokenRow of tokenRows.results || []) {
