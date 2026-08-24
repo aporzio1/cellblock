@@ -337,16 +337,18 @@ async function testLiveActivity(request, env, principal) {
 }
 
 async function status(env) {
-  const db = await env.DB.prepare("SELECT COUNT(*) AS count FROM enrollments WHERE status='enrolled'").first();
+  const enrolled = await env.DB.prepare("SELECT COUNT(*) AS count FROM enrollments WHERE status='enrolled'").first();
   const ford = await env.DB.prepare("SELECT COUNT(*) AS count FROM ford_accounts WHERE status='active'").first();
   const tokens = await env.DB.prepare("SELECT COUNT(*) AS count FROM activity_tokens WHERE invalidated_at IS NULL").first();
+  const lastTick = await env.DB.prepare("SELECT value, updated_at FROM service_state WHERE key='last_cron_tick'").first();
   const config = requiredAPNs(env) ? "configured" : "notConfigured";
-  const pollingConfigured = ford?.count && config === "configured" ? "configured" : "notConfigured";
+  const enrolledVehicles = enrolled?.count || 0;
+  const fordAuthorizations = ford?.count || 0;
   return json({
     service: "cellblock-live-activities",
     status: "ok",
-    enrolledVehicles: db?.count || 0,
-    fordAuthorizations: ford?.count || 0,
+    enrolledVehicles,
+    fordAuthorizations,
     activityTokens: tokens?.count || 0,
     apns: config,
     apnsInputs: {
@@ -355,7 +357,9 @@ async function status(env) {
       privateKey: Boolean(apnsPrivateKey(env)),
       bundleID: Boolean(env.APNS_BUNDLE_ID)
     },
-    backgroundPolling: pollingConfigured
+    scheduler: lastTick ? "active" : "notObserved",
+    lastCronTick: lastTick ? { at: lastTick.updated_at, ...(JSON.parse(lastTick.value || "{}")) } : null,
+    backgroundPolling: enrolledVehicles > 0 && fordAuthorizations > 0 ? "active" : "waitingForEnrollment"
   });
 }
 
