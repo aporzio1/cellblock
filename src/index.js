@@ -5,6 +5,13 @@ function json(body, status = 200) {
 }
 
 function nowISO() { return new Date().toISOString(); }
+
+async function recordFordAuthorizationResult(env, category, upstreamStatus = null) {
+  const timestamp = nowISO();
+  await env.DB.prepare(`INSERT INTO service_state(key, value, updated_at) VALUES ('last_ford_authorization', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`)
+    .bind(JSON.stringify({ category, upstreamStatus }), timestamp).run();
+}
 function id() { return crypto.randomUUID(); }
 
 async function sha256(value) {
@@ -208,12 +215,16 @@ async function authorizeFord(request, env, principal) {
     redirect_uri: body.redirectURI || FORD_REDIRECT_URI
   });
   if (!exchanged.response.ok || !exchanged.payload?.access_token) {
+    await recordFordAuthorizationResult(env, "tokenExchangeRejected", exchanged.response.status);
     return json({ error: "Ford reauthorization required" }, 401);
   }
   const garageResponse = await fetch(`${FORD_DATA_BASE}/garage`, {
     headers: { Authorization: `Bearer ${exchanged.payload.access_token}`, Accept: "application/json" }
   });
-  if (!garageResponse.ok) return json({ error: "Ford vehicle lookup failed" }, 502);
+  if (!garageResponse.ok) {
+    await recordFordAuthorizationResult(env, "garageRejected", garageResponse.status);
+    return json({ error: "Ford vehicle lookup failed" }, 502);
+  }
   const garage = await garageResponse.json().catch(() => null);
   let matchedVIN = null;
   for (const vin of garageVINs(garage)) {
@@ -223,7 +234,10 @@ async function authorizeFord(request, env, principal) {
       break;
     }
   }
-  if (!matchedVIN) return json({ error: "Vehicle authorization required" }, 403);
+  if (!matchedVIN) {
+    await recordFordAuthorizationResult(env, "vehicleNotMatched", garageResponse.status);
+    return json({ error: "Vehicle authorization required" }, 403);
+  }
   const rotatedRefreshToken = exchanged.payload.refresh_token || body.refreshToken;
   const timestamp = nowISO();
   const accountID = `ford-${principal.installation_id}`;
@@ -239,6 +253,7 @@ async function authorizeFord(request, env, principal) {
   await env.DB.prepare(`UPDATE enrollments SET vehicle_ciphertext=?, updated_at=?
       WHERE installation_id=? AND opaque_vehicle_id=? AND status='enrolled'`)
     .bind(await encrypt(matchedVIN, env), timestamp, principal.installation_id, body.opaqueVehicleID).run();
+  await recordFordAuthorizationResult(env, "authorized", garageResponse.status);
   return json({ status: "authorized" });
 }
 
