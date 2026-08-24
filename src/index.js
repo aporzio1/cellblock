@@ -63,8 +63,12 @@ async function fordTokenExchange(env, params) {
   return { response, payload: await response.json().catch(() => null) };
 }
 
+function apnsPrivateKey(env) {
+  return env.APNS_PRIVATE_KEY_P8 || env.APNS_AUTH_KEY || null;
+}
+
 function requiredAPNs(env) {
-  return env.APNS_TEAM_ID && env.APNS_KEY_ID && env.APNS_AUTH_KEY && env.APNS_BUNDLE_ID ? env : null;
+  return env.APNS_TEAM_ID && env.APNS_KEY_ID && apnsPrivateKey(env) && env.APNS_BUNDLE_ID ? env : null;
 }
 
 function base64url(value) {
@@ -81,7 +85,7 @@ function pemBytes(pem) {
 async function apnsJWT(env) {
   const header = base64url(new TextEncoder().encode(JSON.stringify({ alg: "ES256", kid: env.APNS_KEY_ID })));
   const claims = base64url(new TextEncoder().encode(JSON.stringify({ iss: env.APNS_TEAM_ID, iat: Math.floor(Date.now() / 1000) })));
-  const key = await crypto.subtle.importKey("pkcs8", pemBytes(env.APNS_AUTH_KEY), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const key = await crypto.subtle.importKey("pkcs8", pemBytes(apnsPrivateKey(env)), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(`${header}.${claims}`));
   return `${header}.${claims}.${base64url(signature)}`;
 }
@@ -205,6 +209,7 @@ async function authorizeFord(request, env, principal) {
   });
   const garage = await garageResponse.json().catch(() => null);
   const vehicles = [
+    ...(typeof garage?.vin === "string" ? [{ vin: garage.vin }] : []),
     ...(Array.isArray(garage?.vehicles) ? garage.vehicles : []),
     ...(Array.isArray(garage?.data) ? garage.data : [])
   ];
@@ -344,6 +349,12 @@ async function status(env) {
     fordAuthorizations: ford?.count || 0,
     activityTokens: tokens?.count || 0,
     apns: config,
+    apnsInputs: {
+      team: Boolean(env.APNS_TEAM_ID),
+      keyID: Boolean(env.APNS_KEY_ID),
+      privateKey: Boolean(apnsPrivateKey(env)),
+      bundleID: Boolean(env.APNS_BUNDLE_ID)
+    },
     backgroundPolling: pollingConfigured
   });
 }
