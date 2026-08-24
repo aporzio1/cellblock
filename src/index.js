@@ -217,8 +217,9 @@ async function authorizeFord(request, env, principal) {
   const garage = await garageResponse.json().catch(() => null);
   let matchedVIN = null;
   for (const vin of garageVINs(garage)) {
-    if (`v1-${(await sha256(vin)).slice(0, 32)}` === body.opaqueVehicleID) {
-      matchedVIN = vin;
+    const normalizedVIN = vin.toUpperCase();
+    if (`v1-${(await sha256(normalizedVIN)).slice(0, 32)}` === body.opaqueVehicleID) {
+      matchedVIN = normalizedVIN;
       break;
     }
   }
