@@ -346,7 +346,10 @@ async function testLiveActivity(request, env, principal) {
       FROM activity_tokens WHERE enrollment_id=? AND token_kind=? AND invalidated_at IS NULL
       ORDER BY updated_at DESC LIMIT 10`)
     .bind(enrollment.enrollment_id, tokenKind).all();
-  if (!tokens.results?.length) return json({ error: `No ${tokenKind} token registered` }, 409);
+  if (!tokens.results?.length) {
+    const code = tokenKind === "pushToStart" ? "noPushToStartToken" : "noActivityToken";
+    return json({ error: code }, 409);
+  }
 
   const contentState = {
     phase: action === "end" ? "plugged" : "active",
@@ -367,6 +370,9 @@ async function testLiveActivity(request, env, principal) {
     if (result.reason === "invalid") {
       await env.DB.prepare("UPDATE activity_tokens SET invalidated_at=?, updated_at=? WHERE enrollment_id=? AND token_kind=? AND activity_id=?")
         .bind(nowISO(), nowISO(), enrollment.enrollment_id, tokenKind, row.activity_id || "").run();
+    } else if (action === "end" && result.status === 200) {
+      await env.DB.prepare("UPDATE activity_tokens SET invalidated_at=?, updated_at=? WHERE enrollment_id=? AND token_kind='activity' AND activity_id=?")
+        .bind(nowISO(), nowISO(), enrollment.enrollment_id, row.activity_id || "").run();
     }
   }
   return json({ action, results });
@@ -376,6 +382,8 @@ async function status(env) {
   const enrolled = await env.DB.prepare("SELECT COUNT(*) AS count FROM enrollments WHERE status='enrolled'").first();
   const ford = await env.DB.prepare("SELECT COUNT(*) AS count FROM ford_accounts WHERE status='active'").first();
   const tokens = await env.DB.prepare("SELECT COUNT(*) AS count FROM activity_tokens WHERE invalidated_at IS NULL").first();
+  const pushToStartTokens = await env.DB.prepare("SELECT COUNT(*) AS count FROM activity_tokens WHERE token_kind='pushToStart' AND invalidated_at IS NULL").first();
+  const perActivityTokens = await env.DB.prepare("SELECT COUNT(*) AS count FROM activity_tokens WHERE token_kind='activity' AND invalidated_at IS NULL").first();
   const lastTick = await env.DB.prepare("SELECT value, updated_at FROM service_state WHERE key='last_cron_tick'").first();
   const config = requiredAPNs(env) ? "configured" : "notConfigured";
   const enrolledVehicles = enrolled?.count || 0;
@@ -386,6 +394,8 @@ async function status(env) {
     enrolledVehicles,
     fordAuthorizations,
     activityTokens: tokens?.count || 0,
+    pushToStartTokens: pushToStartTokens?.count || 0,
+    perActivityTokens: perActivityTokens?.count || 0,
     apns: config,
     apnsInputs: {
       team: Boolean(env.APNS_TEAM_ID),
@@ -505,12 +515,15 @@ async function pollDue(env) {
         .bind(new Date(Date.now() + intervalMinutes * 60000).toISOString(), sourceAt.toISOString(), phase, soc, powerKW, sessionID, event === "start" ? sourceAt.toISOString() : null, nowISO(), row.enrollment_id).run();
       await env.DB.prepare("UPDATE ford_accounts SET refresh_token_ciphertext=?, token_expires_at=?, updated_at=? WHERE ford_account_id=?")
         .bind(await encrypt(exchanged.payload.refresh_token || refreshToken, env), exchanged.payload.refresh_token_expires_in ? new Date(Date.now() + exchanged.payload.refresh_token_expires_in * 1000).toISOString() : null, nowISO(), row.ford_account_id).run();
+      // A push-to-start token is valid only for `start`. Per-activity tokens are
+      // valid only for update/end of the already-running ActivityKit activity.
+      const requiredKind = event === "start" ? "pushToStart" : "activity";
       const tokenRows = await env.DB.prepare(`SELECT token_ciphertext, apns_environment, token_kind, activity_id
-          FROM activity_tokens WHERE enrollment_id=? AND invalidated_at IS NULL`).bind(row.enrollment_id).all();
+          FROM activity_tokens WHERE enrollment_id=? AND token_kind=? AND invalidated_at IS NULL`)
+        .bind(row.enrollment_id, requiredKind).all();
       for (const tokenRow of tokenRows.results || []) {
         const token = await decrypt(tokenRow.token_ciphertext, env);
-        const tokenEvent = event === "start" && tokenRow.token_kind === "pushToStart" ? "start" : event;
-        const result = await sendAPNs(env, token, tokenRow.apns_environment, tokenEvent, {
+        const result = await sendAPNs(env, token, tokenRow.apns_environment, event, {
           phase,
           powerKW,
           socPercent: soc,
@@ -519,8 +532,9 @@ async function pollDue(env) {
           startedAt: sourceAt.toISOString(),
           lastSourceUpdatedAt: sourceAt.toISOString(),
           isStale: false
-        }, tokenEvent === "start" ? { sessionID, vehicleDisplayName: "Your vehicle" } : null);
+        }, event === "start" ? { sessionID, vehicleDisplayName: "Your vehicle" } : null);
         if (result.reason === "invalid") await env.DB.prepare("UPDATE activity_tokens SET invalidated_at=?, updated_at=? WHERE enrollment_id=? AND token_kind=? AND activity_id=?").bind(nowISO(), nowISO(), row.enrollment_id, tokenRow.token_kind, tokenRow.activity_id).run();
+        else if (event === "end" && result.status === 200) await env.DB.prepare("UPDATE activity_tokens SET invalidated_at=?, updated_at=? WHERE enrollment_id=? AND token_kind='activity' AND activity_id=?").bind(nowISO(), nowISO(), row.enrollment_id, tokenRow.activity_id).run();
       }
       polled++;
     } catch (error) {
