@@ -146,10 +146,12 @@ export default {
     const installationResponse = await handleInstallationRequest(request, env);
     if (installationResponse) return installationResponse;
 
-    if (!env.CLIENT_ID || !env.CLIENT_SECRET) {
+    if (!env.CLIENT_ID && !env.FORD_CLIENT_ID) {
       return json(env, request, 500, { error: 'Worker missing CLIENT_ID/CLIENT_SECRET secrets' });
     }
-    const scope = `${env.CLIENT_ID} offline_access openid`;
+    const clientId = env.CLIENT_ID || env.FORD_CLIENT_ID;
+    const clientSecret = env.CLIENT_SECRET || env.FORD_CLIENT_SECRET;
+    const scope = `${clientId} offline_access openid`;
 
     try {
       // Enforce browser origins on auth/token/data endpoints. Native requests
@@ -171,8 +173,8 @@ export default {
           grant_type: 'authorization_code',
           code,
           redirect_uri,
-          client_id: env.CLIENT_ID,
-          client_secret: env.CLIENT_SECRET,
+          client_id: clientId,
+          client_secret: clientSecret,
           scope
         });
       }
@@ -188,8 +190,8 @@ export default {
           grant_type: 'refresh_token',
           refresh_token,
           redirect_uri,
-          client_id: env.CLIENT_ID,
-          client_secret: env.CLIENT_SECRET,
+          client_id: clientId,
+          client_secret: clientSecret,
           scope
         });
       }

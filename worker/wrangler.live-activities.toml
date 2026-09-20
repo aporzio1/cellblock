@@ -1,22 +1,19 @@
 name = "cellblock-live-activities"
 main = "index.js"
-compatibility_date = "2026-07-01"
+compatibility_date = "2026-08-21"
+
+exports = { FordRateLimiter = { type = "durable-object", storage = "sqlite" } }
 
 [triggers]
 crons = ["* * * * *"]
 
-[durable_objects]
-bindings = [
-  { name = "FORD_RATE_LIMITER", class_name = "FordRateLimiter" }
-]
+[[durable_objects.bindings]]
+name = "FORD_RATE_LIMITER"
+class_name = "FordRateLimiter"
 
 [[kv_namespaces]]
 binding = "INSTALLATIONS"
 id = "a0e5a5bc37464afa933101fc8de859e0"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["FordRateLimiter"]
 
 [vars]
 ALLOWED_ORIGIN = "https://cellblock.cc,https://proxy.cellblock.cc"

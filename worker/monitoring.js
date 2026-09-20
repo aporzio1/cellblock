@@ -103,13 +103,15 @@ async function updateAuthorization(env, key, record, changes) {
 }
 
 async function exchangeRefreshToken(env, refreshToken, fetchImpl) {
-  const scope = `${env.CLIENT_ID} offline_access openid`;
+  const clientId = env.CLIENT_ID || env.FORD_CLIENT_ID;
+  const clientSecret = env.CLIENT_SECRET || env.FORD_CLIENT_SECRET;
+  const scope = `${clientId} offline_access openid`;
   const response = await fetchImpl(FORD_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'refresh_token', refresh_token: refreshToken,
-      redirect_uri: REGISTERED_REDIRECT_URI, client_id: env.CLIENT_ID, client_secret: env.CLIENT_SECRET, scope
+      redirect_uri: REGISTERED_REDIRECT_URI, client_id: clientId, client_secret: clientSecret, scope
     })
   });
   let body = {};
