@@ -120,6 +120,20 @@ test('scheduled monitoring emits one APNs start and dedupes the next minute poll
   assert.equal(stored.lastState.charging, true);
 });
 
+test('cron telemetry reads route through the shared Ford proxy', async () => {
+  const { targetEnv } = await enrolledEnvironment('home');
+  const calls = [];
+  const fakeFetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }), { status: 200 });
+    return new Response(JSON.stringify({ timestamp: '2026-08-22T15:00:00Z', metrics: {} }), { status: 200 });
+  };
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 5_000_000 });
+  const telemetry = calls.find(url => url.includes('/telemetry'));
+  assert.ok(telemetry, 'expected a telemetry call');
+  assert.ok(telemetry.startsWith('https://proxy.cellblock.cc/api/data/telemetry'), telemetry);
+});
+
 test('steady noncharging telemetry causes no authorization KV puts after initialization', async () => {
   const { targetEnv } = await enrolledEnvironment('home');
   const originalPut = targetEnv.INSTALLATIONS.put.bind(targetEnv.INSTALLATIONS);
