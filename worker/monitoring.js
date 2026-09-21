@@ -144,7 +144,12 @@ async function apnsJWT(env, now) {
   return `${input}.${base64UrlEncode(new Uint8Array(signature))}`;
 }
 
-function contentState(telemetry, state, now) {
+// The user's measurement-system preference, carried to the widget so range is
+// rendered in mi or km. The widget falls back to the device locale when the
+// field is absent (an enrollment made before units existed).
+const VALID_UNITS = new Set(['imperial', 'metric']);
+
+function contentState(telemetry, state, now, units) {
   const swiftDate = value => {
     const milliseconds = typeof value === 'number' ? value : Date.parse(value);
     if (!Number.isFinite(milliseconds)) return (now - 978307200000) / 1000;
@@ -158,12 +163,13 @@ function contentState(telemetry, state, now) {
     timeToFullMinutes: telemetry.etaMinutes === null ? null : Math.round(telemetry.etaMinutes),
     startedAt: swiftDate(state.startedAt || now),
     lastSourceUpdatedAt: swiftDate(telemetry.sourceTimestamp),
-    isStale: false
+    isStale: false,
+    units: VALID_UNITS.has(units) ? units : null
   };
 }
 
 export function apnsPayload(event, telemetry, state, now, attributesType) {
-  const aps = { timestamp: Math.floor(now / 1000), event, 'content-state': contentState(telemetry, state, now) };
+  const aps = { timestamp: Math.floor(now / 1000), event, 'content-state': contentState(telemetry, state, now, state.units) };
   if (event === 'start') {
     // Match Apple's push-to-start example: use the declared attributes name.
     aps['attributes-type'] = attributesType || 'ChargingActivityAttributes';
@@ -271,7 +277,7 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
   try { tokenRecord = tokenRaw ? JSON.parse(tokenRaw) : null; } catch { tokenRecord = null; }
   let token;
   try { token = tokenRecord?.tokenCiphertext ? await decryptValue(tokenRecord.tokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY) : null; } catch { token = null; }
-  const result = await sendAPNs(env, enrollment.apnsEnvironment, token, event, { ...telemetry, charging }, { ...nextState, enrollmentID: enrollment.enrollmentID }, now, fetchImpl);
+  const result = await sendAPNs(env, enrollment.apnsEnvironment, token, event, { ...telemetry, charging }, { ...nextState, enrollmentID: enrollment.enrollmentID, units: enrollment.units }, now, fetchImpl);
   const tokenStorageKey = await tokenKey(installationID, record.opaqueVehicleIDHash, kind);
   if (result.outcome === 'invalidToken') {
     await env.INSTALLATIONS.delete(tokenStorageKey);

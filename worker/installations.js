@@ -73,6 +73,13 @@ function optionalStringField(body, name, limit) {
   return stringField(body, name, limit);
 }
 
+// Optional measurement-system preference ('imperial' | 'metric'). An absent or
+// unrecognized value reads as "not provided" — never 400, so a newer client on
+// an unknown value still enrolls successfully.
+function validUnits(value) {
+  return value === 'imperial' || value === 'metric' ? value : undefined;
+}
+
 function base64UrlEncode(bytes) {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -215,6 +222,7 @@ async function enroll(env, request) {
     const opaqueVehicleID = stringField(body, 'opaqueVehicleID', 512);
     const apnsEnvironment = stringField(body, 'apnsEnvironment', 64);
     const chargingMode = stringField(body, 'chargingMode', 64);
+    const units = validUnits(optionalStringField(body, 'units', 16));
     const existing = await enrollmentRecord(env, credential.installationID, opaqueVehicleID);
     const enrollmentID = existing.record?.enrollmentID || crypto.randomUUID();
     await env.INSTALLATIONS.put(existing.key, JSON.stringify({
@@ -222,6 +230,9 @@ async function enroll(env, request) {
       opaqueVehicleIDHash: existing.hash,
       apnsEnvironment,
       chargingMode,
+      // An enroll without a units value keeps a previously stored preference;
+      // app builds that predate the field must not reset it to null.
+      units: units ?? existing.record?.units ?? null,
       enrollmentID
     }));
     return response(env, request, 200, { status: 'enrolled', enrollmentID });
@@ -292,14 +303,19 @@ async function updatePreferences(env, request, pathname) {
       'opaqueVehicleID',
       512
     );
-    const chargingMode = stringField(await readJson(request), 'chargingMode', 64);
+    const body = await readJson(request);
+    const chargingMode = stringField(body, 'chargingMode', 64);
+    const units = validUnits(optionalStringField(body, 'units', 16));
     const existing = await enrollmentRecord(env, credential.installationID, opaqueVehicleID);
     if (!existing.record) return response(env, request, 404, { error: 'Enrollment not found' });
     await env.INSTALLATIONS.put(existing.key, JSON.stringify({
       ...existing.record,
-      chargingMode
+      chargingMode,
+      units: units ?? existing.record.units ?? null
     }));
-    return response(env, request, 200, { chargingMode });
+    // Units is echoed only when the client sent it, so pre-units clients still
+    // receive exactly the shape they negotiated.
+    return response(env, request, 200, units === undefined ? { chargingMode } : { chargingMode, units });
   } catch (error) {
     if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });
     throw error;

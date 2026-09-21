@@ -288,3 +288,72 @@ test('invalid Ford grant marks authorization for reauthorization', async () => {
   const auth = [...targetEnv.INSTALLATIONS.values.entries()].find(([key]) => key.startsWith('ford-authorization:'));
   assert.equal(JSON.parse(auth[1]).status, 'reauthorizationRequired');
 });
+
+function testPem(keyPair) {
+  return async () => {
+    const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey));
+    const body = Buffer.from(pkcs8).toString('base64').replace(/(.{64})/g, '$1\n');
+    return `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----`;
+  };
+}
+
+test('content-state carries the enrolled units preference to the widget', async () => {
+  const { targetEnv, token } = await enrolledEnvironment('home');
+  // Re-enroll with an explicit units preference (enroll is idempotent).
+  await handleInstallationRequest(request('/api/live-activities/enroll', {
+    token,
+    body: { opaqueVehicleID: 'opaque-vehicle', apnsEnvironment: 'sandbox', chargingMode: 'home', units: 'imperial' }
+  }), targetEnv);
+  await handleInstallationRequest(request('/api/live-activities/tokens', {
+    method: 'PUT', token,
+    body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+  }), targetEnv);
+  Object.assign(targetEnv, { APNS_PRIVATE_KEY_P8: await (await testPem(await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])))() });
+  const calls = [];
+  const fakeFetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }), { status: 200 });
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({
+      timestamp: '2026-08-22T15:00:00Z',
+      metrics: {
+        xevBatteryChargeDisplayStatus: { value: 'CHARGING' },
+        xevBatteryStateOfCharge: { value: 40 },
+        xevBatteryChargerVoltageOutput: { value: 400 },
+        xevBatteryChargerCurrentOutput: { value: 10 }
+      }
+    }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  };
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 12_000_000 });
+  const apns = calls.find(call => call.url.includes('push.apple.com'));
+  assert.ok(apns, 'expected one APNs push');
+  assert.equal(JSON.parse(apns.options.body).aps['content-state'].units, 'imperial');
+});
+
+test('content-state units stays null for an enrollment made without units', async () => {
+  const { targetEnv, token } = await enrolledEnvironment('home');
+  await handleInstallationRequest(request('/api/live-activities/tokens', {
+    method: 'PUT', token,
+    body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+  }), targetEnv);
+  Object.assign(targetEnv, { APNS_PRIVATE_KEY_P8: await (await testPem(await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])))() });
+  const calls = [];
+  const fakeFetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }), { status: 200 });
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({
+      timestamp: '2026-08-22T15:00:00Z',
+      metrics: {
+        xevBatteryChargeDisplayStatus: { value: 'CHARGING' },
+        xevBatteryStateOfCharge: { value: 40 },
+        xevBatteryChargerVoltageOutput: { value: 400 },
+        xevBatteryChargerCurrentOutput: { value: 10 }
+      }
+    }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  };
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 13_000_000 });
+  const apns = calls.find(call => call.url.includes('push.apple.com'));
+  assert.ok(apns, 'expected one APNs push');
+  assert.equal(JSON.parse(apns.options.body).aps['content-state'].units, null);
+});
