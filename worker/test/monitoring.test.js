@@ -238,6 +238,47 @@ test('duplicate vehicle registrations: poll once and push via the token-holding 
   assert.equal(JSON.parse(apns.options.body).aps.event, 'start');
 });
 
+async function apnsResponseScenario(status, reason) {
+  const { targetEnv, installationID, token } = await enrolledEnvironment('home');
+  await handleInstallationRequest(request('/api/live-activities/tokens', {
+    method: 'PUT', token,
+    body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+  }), targetEnv);
+  const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey));
+  const pem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...pkcs8))}\n-----END PRIVATE KEY-----`;
+  Object.assign(targetEnv, { APNS_PRIVATE_KEY_P8: pem });
+  const fakeFetch = async (url) => {
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }), { status: 200 });
+    if (String(url).includes('push.apple.com')) return new Response(JSON.stringify({ reason }), { status });
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({
+      timestamp: '2026-09-21T02:00:00Z', metrics: {
+        xevBatteryChargeDisplayStatus: { value: 'CHARGING' }, xevPlugChargerStatus: { value: 'CHARGING' },
+        xevBatteryStateOfCharge: { value: 95 }, xevBatteryChargerVoltageOutput: { value: 240 }, xevBatteryChargerCurrentOutput: { value: 30 }
+      }
+    }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  };
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 11_000_000 });
+  const tokenKeys = [...targetEnv.INSTALLATIONS.values.keys()].filter(k => k.startsWith('live-activity-toke' + 'n:'));
+  const auth = JSON.parse(targetEnv.INSTALLATIONS.values.get(`ford-authorization:${installationID}`));
+  return { targetEnv, tokenKeys, monitoringError: auth.monitoringError };
+}
+
+test('APNs 400 keeps the push token and records the reason', async () => {
+  const { tokenKeys, monitoringError } = await apnsResponseScenario(400, 'BadMessage');
+  assert.equal(tokenKeys.length, 1, 'a 400 must NOT delete the push-to-start token');
+  assert.equal(monitoringError.status, 400);
+  assert.equal(monitoringError.reason, 'BadMessage');
+});
+
+test('APNs 410 deletes the push token (genuinely unregistered)', async () => {
+  const { tokenKeys, monitoringError } = await apnsResponseScenario(410, 'Unregistered');
+  assert.equal(tokenKeys.length, 0, 'a 410 must delete the dead token');
+  assert.equal(monitoringError.code, 'apnsUnregistered');
+  assert.equal(monitoringError.reason, 'Unregistered');
+});
+
 test('invalid Ford grant marks authorization for reauthorization', async () => {
   const { targetEnv } = await enrolledEnvironment('home');
   await runScheduledMonitoring(targetEnv, {

@@ -173,7 +173,7 @@ function apnsPayload(event, telemetry, state, now) {
 
 async function sendAPNs(env, environment, token, event, telemetry, state, now, fetchImpl) {
   const jwt = await apnsJWT(env, now);
-  if (!jwt || !token) return 'apnsUnavailable';
+  if (!jwt || !token) return { outcome: 'apnsUnavailable' };
   const host = environment === 'production' ? 'api.push.apple.com' : 'api.sandbox.push.apple.com';
   const topic = `${env.APNS_TOPIC}.push-type.liveactivity`;
   const response = await fetchImpl(`https://${host}/3/device/${encodeURIComponent(token)}`, {
@@ -186,9 +186,14 @@ async function sendAPNs(env, environment, token, event, telemetry, state, now, f
     },
     body: JSON.stringify(apnsPayload(event, telemetry, state, now))
   });
-  if (response.status === 400 || response.status === 410) return 'invalidToken';
-  if (!response.ok) return 'retryable';
-  return 'sent';
+  if (response.ok) return { outcome: 'sent', status: response.status };
+  let reason = null;
+  try { reason = (await response.json())?.reason ?? null; } catch { /* non-JSON body */ }
+  // Only 410 Unregistered is proof the token is dead. A 400 (BadTopic,
+  // BadMessageId, Payload…) usually means the token is fine and our request
+  // is wrong — deleting the token there converts a bug into lost delivery.
+  if (response.status === 410) return { outcome: 'invalidToken', status: response.status, reason };
+  return { outcome: 'retryable', status: response.status, reason };
 }
 
 async function monitorAuthorization(env, key, record, fetchImpl, now) {
@@ -266,9 +271,14 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
   try { token = tokenRecord?.tokenCiphertext ? await decryptValue(tokenRecord.tokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY) : null; } catch { token = null; }
   const result = await sendAPNs(env, enrollment.apnsEnvironment, token, event, { ...telemetry, charging }, { ...nextState, enrollmentID: enrollment.enrollmentID }, now, fetchImpl);
   const tokenStorageKey = await tokenKey(installationID, record.opaqueVehicleIDHash, kind);
-  if (result === 'invalidToken') await env.INSTALLATIONS.delete(tokenStorageKey);
-  if (result === 'apnsUnavailable') await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: 'apnsUnavailable', updatedAt: now } });
-  else if (result === 'retryable') await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: 'apnsRetryable', updatedAt: now } });
+  if (result.outcome === 'invalidToken') {
+    await env.INSTALLATIONS.delete(tokenStorageKey);
+    await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: 'apnsUnregistered', updatedAt: now, status: result.status, reason: result.reason } });
+  } else if (result.outcome === 'apnsUnavailable' || result.outcome === 'retryable') {
+    // Record the real APNs status + reason so a delivery failure is diagnosable
+    // from KV alone. Token is kept — 400s are usually our request, not the token.
+    await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: result.outcome, updatedAt: now, status: result.status, reason: result.reason } });
+  }
 }
 
 // Among several registrations for one vehicle, prefer the one whose push-to-
