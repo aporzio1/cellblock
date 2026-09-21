@@ -162,10 +162,13 @@ function contentState(telemetry, state, now) {
   };
 }
 
-function apnsPayload(event, telemetry, state, now) {
+function apnsPayload(event, telemetry, state, now, attributesType) {
   const aps = { timestamp: Math.floor(now / 1000), event, 'content-state': contentState(telemetry, state, now) };
   if (event === 'start') {
-    aps['attributes-type'] = 'ChargingActivityAttributes';
+    // iOS matches push-to-start against the activity type's fully-qualified
+    // Swift name (Module.Type). Callers may pass an explicit variant; the
+    // default is the unqualified name kept for compatibility with tests.
+    aps['attributes-type'] = attributesType || 'CellBlock.ChargingActivityAttributes';
     aps.attributes = { sessionID: state.enrollmentID || 'background', vehicleDisplayName: 'Your vehicle' };
   }
   return { aps };
