@@ -191,6 +191,53 @@ test('allAC mode gates telemetry at or above 25kW', async () => {
   assert.equal(apnsCalls, 0);
 });
 
+test('duplicate vehicle registrations: poll once and push via the token-holding one', async () => {
+  // Real phone (has a push-to-start token) + a stale re-registration of the SAME
+  // vehicle that has none. Reproduce production where the token-less id sorts
+  // first in the index: cron must still deliver to the token holder, not silently
+  // drop the event by polling the dead registration.
+  const { targetEnv, installationID, token } = await enrolledEnvironment('home');
+  await handleInstallationRequest(request('/api/live-activities/tokens', {
+    method: 'PUT', token,
+    body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+  }), targetEnv);
+  const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey));
+  const pem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...pkcs8))}\n-----END PRIVATE KEY-----`;
+  Object.assign(targetEnv, { APNS_PRIVATE_KEY_P8: pem });
+
+  // Clone the real authorization into a token-less stale registration whose id
+  // sorts FIRST, sharing the same opaqueVehicleIDHash.
+  const staleID = '00000000-0000-0000-0000-000000000000';
+  const realKey = `ford-authorization:${installationID}`;
+  const real = JSON.parse(targetEnv.INSTALLATIONS.values.get(realKey));
+  targetEnv.INSTALLATIONS.values.set(`ford-authorization:${staleID}`, JSON.stringify(real));
+  targetEnv.INSTALLATIONS.values.set('ford-authorization-index',
+    JSON.stringify([`ford-authorization:${staleID}`, realKey]));
+
+  const calls = [];
+  const fakeFetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }), { status: 200 });
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({
+      timestamp: '2026-09-21T01:38:08Z', metrics: {
+        xevBatteryChargeDisplayStatus: { value: 'CHARGING' },
+        xevPlugChargerStatus: { value: 'CHARGING' },
+        xevBatteryStateOfCharge: { value: 95 },
+        xevBatteryChargerVoltageOutput: { value: 240 },
+        xevBatteryChargerCurrentOutput: { value: 30 }
+      }
+    }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  };
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 9_000_000 });
+
+  assert.equal(calls.filter(c => c.url.includes('/telemetry')).length, 1, 'one telemetry read per vehicle');
+  const apns = calls.find(c => c.url.includes('push.apple.com'));
+  assert.ok(apns, 'push must be delivered to the token-holding registration');
+  assert.equal(JSON.parse(apns.options.body).aps.event, 'start');
+});
+
 test('invalid Ford grant marks authorization for reauthorization', async () => {
   const { targetEnv } = await enrolledEnvironment('home');
   await runScheduledMonitoring(targetEnv, {

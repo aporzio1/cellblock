@@ -271,6 +271,25 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
   else if (result === 'retryable') await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: 'apnsRetryable', updatedAt: now } });
 }
 
+// Among several registrations for one vehicle, prefer the one whose push-to-
+// start token is on record — the only registration that can actually receive a
+// Live Activity push. A stale re-registration shares the vehicle's rate budget
+// but can never deliver, so polling it first would silently drop the event.
+async function chooseDeliverable(env, group) {
+  for (const candidate of group) {
+    const installationID = candidate.key.slice('ford-authorization:'.length);
+    try {
+      const tokenRaw = await env.INSTALLATIONS.get(
+        await tokenKey(installationID, candidate.record.opaqueVehicleIDHash, 'pushToStart')
+      );
+      if (tokenRaw) return candidate;
+    } catch {
+      // Treat an unreadable token as absent and keep looking.
+    }
+  }
+  return group[0];
+}
+
 export async function runScheduledMonitoring(env, options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const now = options.now || Date.now();
@@ -282,13 +301,32 @@ export async function runScheduledMonitoring(env, options = {}) {
     keys = [];
   }
   if (!Array.isArray(keys)) return;
+
+  // Ford's rate budget is per-vehicle. Duplicate registrations of the same
+  // vehicle would compete for the one shared slot and a token-less copy could
+  // win it and drop the push, so group by vehicle and poll each once.
+  const byVehicle = new Map();
   for (const key of keys) {
     if (typeof key !== 'string' || !key.startsWith('ford-authorization:')) continue;
     try {
       const raw = await env.INSTALLATIONS.get(key);
-      if (raw) await monitorAuthorization(env, key, JSON.parse(raw), fetchImpl, now);
+      if (!raw) continue;
+      const record = JSON.parse(raw);
+      const vehicleHash = record?.opaqueVehicleIDHash || key;
+      const group = byVehicle.get(vehicleHash);
+      if (group) group.push({ key, record });
+      else byVehicle.set(vehicleHash, [{ key, record }]);
     } catch {
-      // A bad record must not prevent the remaining installations from running.
+      // A bad record must not prevent the remaining vehicles from running.
+    }
+  }
+
+  for (const group of byVehicle.values()) {
+    const chosen = group.length === 1 ? group[0] : await chooseDeliverable(env, group);
+    try {
+      await monitorAuthorization(env, chosen.key, chosen.record, fetchImpl, now);
+    } catch {
+      // A failure for one vehicle must not stop the others.
     }
   }
 }
