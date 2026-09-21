@@ -96,8 +96,19 @@ function retryAfterMilliseconds(value) {
   return Number.isFinite(date) ? Math.max(0, date - Date.now()) : FORD_REQUEST_INTERVAL_MS;
 }
 
-async function limiterFor(env, authorization) {
-  const data = new TextEncoder().encode(authorization);
+const VIN_PATTERN = /^[A-Z0-9]{17}$/;
+
+// Ford's request budget is per vehicle. Telemetry reads carry a vin param,
+// so those requests share one limiter bucket keyed by VIN — that is how the
+// iOS app and the Live Activities cron serialize instead of blindly
+// competing for the same budget. Paths without a vin fall back to the
+// per-token bucket.
+async function limiterFor(env, request) {
+  const vin = new URL(request.url).searchParams.get('vin') || '';
+  const digestInput = VIN_PATTERN.test(vin)
+    ? `vehicle:${vin}`
+    : `token:${request.headers.get('authorization') || ''}`;
+  const data = new TextEncoder().encode(digestInput);
   const digest = await crypto.subtle.digest('SHA-256', data);
   const key = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
   return env.FORD_RATE_LIMITER.get(env.FORD_RATE_LIMITER.idFromName(key));
@@ -224,7 +235,7 @@ export default {
         const auth = request.headers.get('authorization');
         if (!auth) return json(env, request, 401, { error: 'Authorization header is required' });
 
-        const limiter = await limiterFor(env, auth);
+        const limiter = await limiterFor(env, request);
         const permission = await limiter.allow();
         if (!permission.allowed) {
           return rateLimitedResponse(env, request, permission.retryAfterMs);

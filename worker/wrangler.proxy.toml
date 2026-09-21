@@ -1,0 +1,18 @@
+name = "cellblock-proxy"
+main = "index.js"
+compatibility_date = "2026-08-21"
+
+[[durable_objects.bindings]]
+name = "FORD_RATE_LIMITER"
+class_name = "FordRateLimiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FordRateLimiter"]
+
+[[kv_namespaces]]
+binding = "INSTALLATIONS"
+id = "ffa6f41ca51849459a941f2467c67d6d"
+
+[vars]
+ALLOWED_ORIGIN = "https://cellblock.cc,https://proxy.cellblock.cc"

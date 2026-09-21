@@ -1,5 +1,8 @@
 const FORD_TOKEN_URL = 'https://api.vehicle.ford.com/dah2vb2cprod.onmicrosoft.com/oauth2/v2.0/token?p=B2C_1A_FCON_AUTHORIZE';
-const FORD_TELEMETRY_URL = 'https://api.vehicle.ford.com/fcon-query/v1/telemetry';
+// All telemetry reads — app and monitoring cron — go through the proxy
+// worker's /api/data/telemetry so every request for one vehicle serializes
+// on the shared VIN-keyed FordRateLimiter bucket. Override per environment.
+const FORD_DATA_PROXY_BASE = 'https://proxy.cellblock.cc/api/data';
 const REGISTERED_REDIRECT_URI = 'https://cellblock.cc/';
 const AUTHORIZATION_INDEX_KEY = 'ford-authorization-index';
 const MIN_CHARGING_POWER_KW = 0.5;
@@ -215,7 +218,8 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
     else await storeMonitoringError(error.retryable ? 'retryableUpstream' : 'tokenExchangeFailed');
     return;
   }
-  const telemetryURL = new URL(FORD_TELEMETRY_URL);
+  const proxyBase = env.FORD_PROXY_BASE || FORD_DATA_PROXY_BASE;
+  const telemetryURL = new URL(`${proxyBase}/telemetry`);
   telemetryURL.searchParams.set('vin', vin);
   const telemetryResponse = await fetchImpl(telemetryURL, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
   if (telemetryResponse.status === 401) {
