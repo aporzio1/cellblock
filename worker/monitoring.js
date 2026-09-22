@@ -259,12 +259,15 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
   try { enrollment = JSON.parse(enrollmentRaw); } catch { return; }
   const charging = modeAllowsCharging(enrollment.chargingMode, telemetry);
   const previous = record.lastState || { charging: false };
-  const current = { charging, socPercent: telemetry.socPercent, etaMinutes: telemetry.etaMinutes, sourceTimestamp: telemetry.sourceTimestamp, startedAt: previous.startedAt };
+  const current = { charging, socPercent: telemetry.socPercent, powerKW: telemetry.powerKW, etaMinutes: telemetry.etaMinutes, sourceTimestamp: telemetry.sourceTimestamp, startedAt: previous.startedAt };
   const started = !previous.charging && charging;
   const ended = previous.charging && !charging;
+  const powerChanged = previous.powerKW !== undefined && telemetry.powerKW !== null &&
+    Math.abs(telemetry.powerKW - (previous.powerKW ?? 0)) >= 2;
   const meaningfulUpdate = previous.charging && charging &&
     ((telemetry.socPercent !== null && telemetry.socPercent !== previous.socPercent) ||
-      (telemetry.etaMinutes !== null && telemetry.etaMinutes !== previous.etaMinutes));
+      (telemetry.etaMinutes !== null && telemetry.etaMinutes !== previous.etaMinutes) ||
+      powerChanged);
   const event = started ? 'start' : ended ? 'end' : meaningfulUpdate ? 'update' : null;
   const nextState = { ...current, startedAt: started ? new Date(now).toISOString() : previous.startedAt };
   if (!record.lastState || event) {
