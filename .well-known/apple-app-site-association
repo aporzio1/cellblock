@@ -1,15 +1,24 @@
 {
-  "applinks": {
-    "details": [
-      {
-        "appID": "7SWMRCM496.com.andrewporzio.CellBlock",
-        "paths": ["/"]
-      }
+ "applinks": {
+  "details": [
+   {
+    "appID": "7SWMRCM496.com.andrewporzio.CellBlock",
+    "paths": [
+     "/"
     ]
-  },
-  "webcredentials": {
-    "apps": [
-      "7SWMRCM496.com.andrewporzio.CellBlock"
+   },
+   {
+    "appID": "7SWMRCM496.com.andrewporzio.Ignition",
+    "paths": [
+     "/"
     ]
-  }
+   }
+  ]
+ },
+ "webcredentials": {
+  "apps": [
+   "7SWMRCM496.com.andrewporzio.CellBlock",
+   "7SWMRCM496.com.andrewporzio.Ignition"
+  ]
+ }
 }
