@@ -74,6 +74,35 @@ function garageStub({ status = 200, contentType = 'application/json', body = VAL
   return { fetchImpl, calls };
 }
 
+// Garage stub that exposes the abort signal passed to fetch and a spy on the
+// body's cancel(), so tests can assert a rejected response is deterministically
+// released (signal aborted + body cancelled) while a verified success is not.
+function observableGarageStub({ status = 200, contentType = 'application/json', body = VALID_GARAGE, contentLength } = {}) {
+  const calls = [];
+  const observation = { signal: null, cancelCalls: 0 };
+  const headers = {};
+  if (contentType !== null) headers['Content-Type'] = contentType;
+  if (contentLength !== undefined) headers['Content-Length'] = String(contentLength);
+  const fetchImpl = (url, options) => {
+    calls.push({ url: String(url), options });
+    observation.signal = options?.signal;
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(body));
+        controller.close();
+      }
+    });
+    const response = new Response(stream, { status, headers });
+    const originalCancel = response.body.cancel.bind(response.body);
+    response.body.cancel = (reason) => {
+      observation.cancelCalls += 1;
+      return originalCancel(reason);
+    };
+    return Promise.resolve(response);
+  };
+  return { fetchImpl, calls, observation };
+}
+
 // Headers arrive only after delayMs; the abort signal cancels the pending
 // response. Exercises the deadline covering the response (headers) phase.
 function slowResponseGarageFetch({ delayMs = 50 } = {}) {
@@ -654,4 +683,88 @@ test('bootstrap accepts a structured +json media type and mints credentials', as
   assert.equal(typeof installationID, 'string');
   assert.equal(typeof token, 'string');
   assert.equal(targetEnv.INSTALLATIONS.values.size, 2);
+});
+
+// F02 re-review: the JSON media type must be a syntactically valid
+// type/subtype (optionally +json). A bare string that merely ends in +json is
+// malformed and must fail closed (503) with zero KV writes.
+test('bootstrap rejects malformed JSON media types and writes nothing', async () => {
+  const malformed = [
+    'not-a-media-type+json',
+    'application/+json',
+    'application/json+',
+    '/json',
+    'application/',
+    'application/ json',
+    'application/json/extra'
+  ];
+  for (const contentType of malformed) {
+    const targetEnv = env();
+    const { fetchImpl } = garageStub({ status: 200, contentType, body: VALID_GARAGE });
+    const response = await handleInstallationRequest(
+      bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+    assert.equal(response.status, 503, `content-type: ${contentType}`);
+    assert.deepEqual(await response.json(), { error: 'Authorization service unavailable' }, `content-type: ${contentType}`);
+    assert.equal(targetEnv.INSTALLATIONS.values.size, 0, `content-type: ${contentType}`);
+  }
+});
+
+// F02 re-review: every early rejection must deterministically release the
+// upstream response — abort the fetch signal and cancel the unconsumed body —
+// so the connection is returned to the pool. A verified success must not.
+test('bootstrap aborts the signal and cancels the body on a non-200 status', async () => {
+  const targetEnv = env();
+  const { fetchImpl, observation } = observableGarageStub({ status: 500, contentType: 'application/json', body: VALID_GARAGE });
+  const response = await handleInstallationRequest(
+    bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 503);
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+  assert.ok(observation.signal instanceof AbortSignal, 'fetch must be given an abort signal');
+  assert.equal(observation.signal.aborted, true, 'signal must be aborted on rejection');
+  assert.ok(observation.cancelCalls >= 1, 'body cancel() must be called on rejection');
+});
+
+test('bootstrap aborts the signal and cancels the body when Ford rejects the bearer (401)', async () => {
+  const targetEnv = env();
+  const { fetchImpl, observation } = observableGarageStub({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: 'invalid_token' }) });
+  const response = await handleInstallationRequest(
+    bootstrapRequest('invalid-ford-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Ford authorization required' });
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+  assert.equal(observation.signal.aborted, true, 'signal must be aborted on rejection');
+  assert.ok(observation.cancelCalls >= 1, 'body cancel() must be called on rejection');
+});
+
+test('bootstrap aborts the signal and cancels the body on a non-JSON media type', async () => {
+  const targetEnv = env();
+  const { fetchImpl, observation } = observableGarageStub({ status: 200, contentType: 'text/html', body: VALID_GARAGE });
+  const response = await handleInstallationRequest(
+    bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 503);
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+  assert.equal(observation.signal.aborted, true, 'signal must be aborted on rejection');
+  assert.ok(observation.cancelCalls >= 1, 'body cancel() must be called on rejection');
+});
+
+test('bootstrap aborts the signal and cancels the body when Content-Length exceeds 64 KiB', async () => {
+  const targetEnv = env();
+  const { fetchImpl, observation } = observableGarageStub({ status: 200, contentType: 'application/json', body: VALID_GARAGE, contentLength: 64 * 1024 + 100 });
+  const response = await handleInstallationRequest(
+    bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 503);
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+  assert.equal(observation.signal.aborted, true, 'signal must be aborted on rejection');
+  assert.ok(observation.cancelCalls >= 1, 'body cancel() must be called on rejection');
+});
+
+test('bootstrap does not abort the signal or cancel the body on a verified success', async () => {
+  const targetEnv = env();
+  const { fetchImpl, observation } = observableGarageStub({ status: 200, contentType: 'application/json', body: VALID_GARAGE });
+  const response = await handleInstallationRequest(
+    bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 200);
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 2);
+  assert.equal(observation.signal.aborted, false, 'signal must not be aborted on success');
+  assert.equal(observation.cancelCalls, 0, 'body must not be cancelled on success');
 });

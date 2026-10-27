@@ -12,6 +12,10 @@ const FORD_GARAGE_URL = 'https://api.vehicle.ford.com/fcon-query/v1/garage';
 const FORD_GARAGE_TIMEOUT_MS = 10_000;
 // Hard cap on the garage response body before it is JSON-parsed.
 const FORD_GARAGE_MAX_BODY_BYTES = 64 * 1024;
+// Bounded wait for cancelling a rejected upstream body. A stuck stream must
+// not hang the request, so the cancel is awaited only this long; the cancel
+// itself is still initiated deterministically.
+const FORD_GARAGE_CANCEL_TIMEOUT_MS = 1_000;
 import { encryptValue, validateVIN } from './monitoring.js';
 
 class BadRequest extends Error {}
@@ -193,13 +197,36 @@ async function encryptRefreshToken(refreshToken, encodedKey) {
 //   - 200 JSON that is not an
 //     object (null/scalar/array)    -> 'invalid'     (503 to the client)
 //
+// On every early rejection (non-200 status, non-JSON media type, or an
+// oversized/failed body) the fetch signal is aborted and the unconsumed body
+// stream is cancelled so the upstream connection is released; cancellation
+// failures are swallowed and the wait is bounded.
+//
 // Every failure path returns before random ID/token generation and before any
 // KV write. The raw bearer is sent only in the Authorization header to the
 // fixed Ford HTTPS URL.
+// A media type is `type "/" subtype` where both are RFC 7230 tokens, with an
+// optional RFC 6838 structured suffix ` "+" suffix` (also a token). Anything
+// else — a missing slash, an empty type/subtype, or a non-token character —
+// is malformed and must not be treated as a JSON media type.
+const MEDIA_TYPE_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
 function isJsonMediaType(contentType) {
   if (!contentType) return false;
   const mediaType = contentType.split(';')[0].trim().toLowerCase();
-  return mediaType === 'application/json' || mediaType.endsWith('+json');
+  const slash = mediaType.indexOf('/');
+  if (slash <= 0) return false;
+  const type = mediaType.slice(0, slash);
+  const rest = mediaType.slice(slash + 1);
+  if (!MEDIA_TYPE_TOKEN.test(type)) return false;
+  const plus = rest.indexOf('+');
+  const subtype = plus === -1 ? rest : rest.slice(0, plus);
+  const suffix = plus === -1 ? null : rest.slice(plus + 1);
+  if (!MEDIA_TYPE_TOKEN.test(subtype)) return false;
+  if (suffix !== null && !MEDIA_TYPE_TOKEN.test(suffix)) return false;
+  // A JSON media type is exactly application/json, or a structured type whose
+  // suffix is the registered +json suffix.
+  return (type === 'application' && subtype === 'json' && suffix === null) || suffix === 'json';
 }
 
 // Read the response body into a byte buffer, enforcing maxBytes. Honors
@@ -242,6 +269,33 @@ async function readBoundedBody(response, maxBytes) {
   return bytes;
 }
 
+// Resolve with the promise's value, or reject after ms if it has not settled.
+// Used to bound the wait on a body cancel so a stuck stream cannot hang the
+// request. The underlying promise is left to settle on its own.
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('cancel timed out')), ms);
+    Promise.resolve(promise).then(
+      value => { clearTimeout(timer); resolve(value); },
+      error => { clearTimeout(timer); reject(error); }
+    );
+  });
+}
+
+// Deterministically release a rejected upstream response: abort the fetch
+// signal and cancel the body stream so the underlying connection is returned
+// to the pool. Cancellation failures are swallowed and the wait is bounded so
+// a stuck stream cannot hang the request. Safe to call on an already-consumed
+// or already-cancelled body (cancel is a no-op there).
+async function releaseRejectedResponse(response, controller) {
+  try { controller.abort(); } catch { /* already aborted */ }
+  const body = response && response.body;
+  if (!body || typeof body.cancel !== 'function') return;
+  try {
+    await withTimeout(body.cancel(), FORD_GARAGE_CANCEL_TIMEOUT_MS);
+  } catch { /* swallow cancellation failures */ }
+}
+
 async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = FORD_GARAGE_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -261,9 +315,11 @@ async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = FORD_GA
     // Contract: exactly HTTP 200. 401/403 mean Ford rejected the bearer;
     // every other status (202, 3xx, 4xx, 5xx) is an unavailable upstream.
     if (garageResponse.status !== 200) {
+      await releaseRejectedResponse(garageResponse, controller);
       return { error: garageResponse.status === 401 || garageResponse.status === 403 ? 'rejected' : 'unavailable' };
     }
     if (!isJsonMediaType(garageResponse.headers.get('content-type'))) {
+      await releaseRejectedResponse(garageResponse, controller);
       return { error: 'unavailable' };
     }
 
@@ -272,6 +328,7 @@ async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = FORD_GA
       bodyBytes = await readBoundedBody(garageResponse, FORD_GARAGE_MAX_BODY_BYTES);
     } catch {
       // Timeout (abort), oversized body, or a mid-stream failure.
+      await releaseRejectedResponse(garageResponse, controller);
       return { error: 'unavailable' };
     }
 
