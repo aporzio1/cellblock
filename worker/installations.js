@@ -2,6 +2,10 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_AUTHORIZATION_BYTES = 8 * 1024;
 const REGISTERED_REDIRECT_URI = 'https://cellblock.cc/';
 const AUTHORIZATION_INDEX_KEY = 'ford-authorization-index';
+// Same garage contract the D1 backend uses (src/index.js): the raw Ford access
+// token is sent as a Bearer scheme; 200 + JSON object is the only accepted
+// success shape.
+const FORD_GARAGE_URL = 'https://api.vehicle.ford.com/fcon-query/v1/garage';
 import { encryptValue, validateVIN } from './monitoring.js';
 
 class BadRequest extends Error {}
@@ -166,10 +170,55 @@ async function encryptRefreshToken(refreshToken, encodedKey) {
   });
 }
 
-async function bootstrap(env, request) {
+// F02: prove the bearer to Ford before minting any installation credential.
+// The garage call is the same request the D1 backend makes (src/index.js).
+// Fail closed: a rejected bearer is a 401; an unavailable or malformed
+// upstream is a 503. Every failure path returns before random ID/token
+// generation and before any KV write.
+async function verifyFordAuthorization(fordToken, fetchImpl) {
+  let garageResponse;
+  try {
+    garageResponse = await fetchImpl(FORD_GARAGE_URL, {
+      headers: { Authorization: `Bearer ${fordToken}`, Accept: 'application/json' }
+    });
+  } catch {
+    return { error: 'unavailable' };
+  }
+  if (garageResponse.status === 401 || garageResponse.status === 403) {
+    return { error: 'rejected' };
+  }
+  if (!garageResponse.ok) {
+    return { error: 'unavailable' };
+  }
+  let garage;
+  try {
+    garage = await garageResponse.json();
+  } catch {
+    return { error: 'invalid' };
+  }
+  // A garage document is a JSON object; null, scalars and bare arrays are
+  // malformed and must not be treated as proof of membership.
+  if (!garage || typeof garage !== 'object' || Array.isArray(garage)) {
+    return { error: 'invalid' };
+  }
+  return { garage };
+}
+
+async function bootstrap(env, request, fetchImpl = fetch) {
   const fordToken = parseBearer(request);
   if (!fordToken) return response(env, request, 401, { error: 'Ford authorization is required' });
   if (!hasKv(env)) return configurationError(env, request);
+
+  const verification = await verifyFordAuthorization(fordToken, fetchImpl);
+  if (verification.error === 'rejected') {
+    return response(env, request, 401, { error: 'Ford authorization required' });
+  }
+  if (verification.error === 'unavailable') {
+    return response(env, request, 503, { error: 'Authorization service unavailable' });
+  }
+  if (verification.error === 'invalid') {
+    return response(env, request, 503, { error: 'Invalid authorization response' });
+  }
 
   const installationID = crypto.randomUUID();
   const token = randomToken();
@@ -392,7 +441,9 @@ async function authorize(env, request) {
   }
 }
 
-export async function handleInstallationRequest(request, env) {
+// options.fetchImpl is a test seam (same pattern as runScheduledMonitoring);
+// production callers omit it and the global fetch is used.
+export async function handleInstallationRequest(request, env, options = {}) {
   const { pathname } = new URL(request.url);
   const installationRoute = pathname === '/api/installations/bootstrap';
   const enrollmentRoute = pathname === '/api/live-activities/enroll';
@@ -416,7 +467,7 @@ export async function handleInstallationRequest(request, env) {
   if (capabilityRoute && request.method !== 'GET') return response(env, request, 404, { error: 'Not found' });
 
   try {
-    if (installationRoute) return bootstrap(env, request);
+    if (installationRoute) return bootstrap(env, request, options.fetchImpl || fetch);
     if (enrollmentRoute) return enroll(env, request);
     if (deleteEnrollmentRoute) return deleteEnrollment(env, request, pathname);
     if (tokenRoute) return registerToken(env, request);

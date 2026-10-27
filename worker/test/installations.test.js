@@ -42,11 +42,33 @@ function request(path, { method = 'POST', headers = {}, body } = {}) {
   });
 }
 
-async function bootstrap(targetEnv = env(), fordToken = 'ford-access-token') {
-  const response = await handleInstallationRequest(request('/api/installations/bootstrap', {
-    headers: { Authorization: 'Bearer ' + fordToken },
+// F02 regression fixtures: bootstrap must prove the bearer to Ford's garage
+// endpoint before minting any installation credential. The garage contract
+// mirrors the D1 backend (src/index.js): GET with the raw Ford access token as
+// a Bearer scheme; 200 + JSON object is the only accepted success shape.
+const VALID_GARAGE = JSON.stringify({
+  vehicles: [{ vin: '1FTVW1ELXPWG00001', year: 2020, make: 'Ford', model: 'F-150' }]
+});
+
+function garageFetch(status = 200, body = VALID_GARAGE) {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return new Response(body, { status, headers: { 'Content-Type': 'application/json' } });
+  };
+  return { fetchImpl, calls };
+}
+
+function bootstrapRequest(fordToken) {
+  return request('/api/installations/bootstrap', {
+    headers: fordToken === undefined ? {} : { Authorization: 'Bearer ' + fordToken },
     body: {}
-  }), targetEnv);
+  });
+}
+
+async function bootstrap(targetEnv = env(), fordToken = 'ford-access-token') {
+  const { fetchImpl } = garageFetch();
+  const response = await handleInstallationRequest(bootstrapRequest(fordToken), targetEnv, { fetchImpl });
   assert.equal(response.status, 200);
   return { data: await response.json(), fordToken };
 }
@@ -56,6 +78,11 @@ function installationRequest(path, token, options = {}) {
     ...options,
     headers: { Authorization: 'Bearer ' + token, ...options.headers }
   });
+}
+
+async function sha256(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 test('enrollment uses the iOS payload and returns a stable enrollment ID', async () => {
@@ -246,4 +273,125 @@ test('unknown routes remain 404 and missing installation configuration is explic
     headers: { Authorization: 'Bearer ford-token' }, body: {}
   }), env({ INSTALLATIONS: undefined }));
   assert.equal(missing.status, 503);
+});
+
+// F02 — bootstrap must verify the bearer with Ford before minting credentials.
+// Every failure path below must return before random ID/token generation and
+// leave the KV namespace untouched.
+
+test('bootstrap rejects a bearer Ford rejects (401) and writes nothing', async () => {
+  const targetEnv = env();
+  const { fetchImpl, calls } = garageFetch(401, JSON.stringify({ error: 'invalid_token' }));
+  const response = await handleInstallationRequest(
+    bootstrapRequest('invalid-ford-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Ford authorization required' });
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+  assert.equal(calls.length, 1);
+});
+
+test('bootstrap rejects a bearer Ford rejects (403) and writes nothing', async () => {
+  const targetEnv = env();
+  const { fetchImpl } = garageFetch(403, JSON.stringify({ error: 'access_denied' }));
+  const response = await handleInstallationRequest(
+    bootstrapRequest('forbidden-ford-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Ford authorization required' });
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+});
+
+test('bootstrap fails closed when the garage endpoint returns 5xx and writes nothing', async () => {
+  const targetEnv = env();
+  const { fetchImpl } = garageFetch(500, 'upstream exploded');
+  const response = await handleInstallationRequest(
+    bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'Authorization service unavailable' });
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+});
+
+test('bootstrap fails closed when the garage endpoint is rate-limited and writes nothing', async () => {
+  const targetEnv = env();
+  const { fetchImpl } = garageFetch(429, '');
+  const response = await handleInstallationRequest(
+    bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 503);
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+});
+
+test('bootstrap fails closed when the garage endpoint is unreachable and writes nothing', async () => {
+  const targetEnv = env();
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    throw new Error('network unreachable');
+  };
+  const response = await handleInstallationRequest(
+    bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+  assert.equal(response.status, 503);
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+  assert.equal(calls.length, 1);
+});
+
+test('bootstrap fails closed on a malformed garage response and writes nothing', async () => {
+  const malformed = [
+    'not-json-at-all',
+    JSON.stringify(null),
+    JSON.stringify(['1FTVW1ELXPWG00001']),
+    JSON.stringify('garage')
+  ];
+  for (const body of malformed) {
+    const targetEnv = env();
+    const { fetchImpl } = garageFetch(200, body);
+    const response = await handleInstallationRequest(
+      bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
+    assert.equal(response.status, 503, `body: ${body}`);
+    assert.deepEqual(await response.json(), { error: 'Invalid authorization response' });
+    assert.equal(targetEnv.INSTALLATIONS.values.size, 0, `body: ${body}`);
+  }
+});
+
+test('bootstrap mints installation state only after verified Ford authorization', async () => {
+  const targetEnv = env();
+  const fordToken = 'verified-ford-access-token';
+  const { fetchImpl, calls } = garageFetch();
+  const response = await handleInstallationRequest(
+    bootstrapRequest(fordToken), targetEnv, { fetchImpl });
+  assert.equal(response.status, 200);
+  const { installationID, token } = await response.json();
+  assert.equal(typeof installationID, 'string');
+  assert.equal(typeof token, 'string');
+
+  // Exactly the two intended entries: the installation record and the
+  // credential index. Nothing else may be written.
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 2);
+  const record = JSON.parse(targetEnv.INSTALLATIONS.values.get(installationID));
+  const tokenHash = await sha256(token);
+  assert.equal(record.tokenHash, tokenHash);
+  assert.equal(record.subjectHash, await sha256(fordToken));
+  assert.equal(targetEnv.INSTALLATIONS.values.get('credential:' + tokenHash), installationID);
+  assert.equal(calls.length, 1);
+});
+
+test('bootstrap sends the raw Ford bearer to the garage endpoint with the Bearer scheme', async () => {
+  const targetEnv = env();
+  const fordToken = 'contract-check-token';
+  const { fetchImpl, calls } = garageFetch();
+  await handleInstallationRequest(bootstrapRequest(fordToken), targetEnv, { fetchImpl });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://api.vehicle.ford.com/fcon-query/v1/garage');
+  const headers = new Headers(calls[0].options?.headers || {});
+  assert.equal(headers.get('authorization'), 'Bearer ' + fordToken);
+  assert.equal(headers.get('accept'), 'application/json');
+});
+
+test('bootstrap without a bearer never contacts Ford and writes nothing', async () => {
+  const targetEnv = env();
+  const { fetchImpl, calls } = garageFetch();
+  const response = await handleInstallationRequest(
+    bootstrapRequest(undefined), targetEnv, { fetchImpl });
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Ford authorization is required' });
+  assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
+  assert.equal(calls.length, 0);
 });

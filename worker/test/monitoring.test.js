@@ -43,11 +43,19 @@ function request(path, { method = 'POST', token, body } = {}) {
   });
 }
 
+// Hermetic garage stub: bootstrap now verifies the bearer with Ford, so test
+// environments must simulate a verified account instead of reaching the real
+// API (which would reject the fixture bearer and burn a real request).
+const verifiedGarageFetch = async () => new Response(
+  JSON.stringify({ vehicles: [{ vin: '1FTVW1ELXPWG00001' }] }),
+  { status: 200, headers: { 'Content-Type': 'application/json' } }
+);
+
 async function enrolledEnvironment(chargingMode = 'home', overrides = {}) {
   const targetEnv = makeEnv({}, overrides);
   const bootstrapResponse = await handleInstallationRequest(request('/api/installations/bootstrap', {
     token: 'ford-access', body: {}
-  }), targetEnv);
+  }), targetEnv, { fetchImpl: verifiedGarageFetch });
   const bootstrap = await bootstrapResponse.json();
   await handleInstallationRequest(request('/api/live-activities/enroll', {
     token: bootstrap.token,
