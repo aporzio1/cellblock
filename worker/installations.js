@@ -296,7 +296,7 @@ async function releaseRejectedResponse(response, controller) {
   } catch { /* swallow cancellation failures */ }
 }
 
-async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = FORD_GARAGE_TIMEOUT_MS) {
+export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = FORD_GARAGE_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
