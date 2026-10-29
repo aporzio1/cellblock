@@ -24,7 +24,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const vehicleKey = hash(`vehicle:${VIN}`);
 const membershipKey = (token = TOKEN, vin = VIN) => hash(`vin-authorization:${JSON.stringify([token, vin])}`);
 
-function fixture(t, { garageStatus = 200, garageBody = { vehicles: [{ vin: VIN }] }, telemetryStatus = 200, networkError = false } = {}) {
+function fixture(t, { garageStatus = 200, garageBody = { vehicles: [{ vin: VIN }] }, telemetryStatus = 200, telemetryRetryAfter, telemetryRedirect = false, telemetryNetworkError = false, networkError = false } = {}) {
   let now = 1_800_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const objects = new Map();
@@ -55,7 +55,7 @@ function fixture(t, { garageStatus = 200, garageBody = { vehicles: [{ vin: VIN }
       }
     }
   };
-  const state = { garageStatus, garageBody, telemetryStatus, networkError };
+  const state = { garageStatus, garageBody, telemetryStatus, telemetryRetryAfter, telemetryRedirect, telemetryNetworkError, networkError };
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     calls.push({ url: String(url), options });
     if (String(url).endsWith('/garage')) {
@@ -64,7 +64,13 @@ function fixture(t, { garageStatus = 200, garageBody = { vehicles: [{ vin: VIN }
         status: state.garageStatus, headers: { 'Content-Type': 'application/json' }
       });
     }
-    return new Response('{}', { status: state.telemetryStatus, headers: { 'Content-Type': 'application/json' } });
+    if (state.telemetryRedirect) {
+      return new Response(null, { status: 302, headers: { Location: 'https://login.ford.example/' } });
+    }
+    if (state.telemetryNetworkError) throw new Error('dummy telemetry upstream network failure');
+    const headers = { 'Content-Type': 'application/json' };
+    if (state.telemetryRetryAfter) headers['Retry-After'] = state.telemetryRetryAfter;
+    return new Response('{}', { status: state.telemetryStatus, headers });
   });
   const send = ({ auth = `Bearer ${TOKEN}`, query = `vin=${VIN}`, path = 'vehicle', ip = '192.0.2.1', forwarded } = {}) => {
     const headers = { Origin: 'https://cellblock.cc' };
@@ -104,14 +110,14 @@ for (const query of ['vin=', 'vin=short', `vin=${VIN.toLowerCase()}`, 'vin=1FTVW
   });
 }
 
-for (const [garageStatus, expected] of [[401, 401], [403, 401], [429, 503], [500, 503], [503, 503], [302, 503], [202, 503]]) {
+for (const [garageStatus, expected] of [[401, 401], [403, 401], [429, 503], [500, 503], [503, 503], [302, 401], [202, 503]]) {
   test(`Ford garage ${garageStatus} fails closed`, async t => {
     const f = fixture(t, { garageStatus });
     const response = await f.send();
     assert.equal(response.status, expected);
     assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://cellblock.cc');
     assert.equal(f.garageCalls().length, 1);
-    assert.equal(f.garageCalls()[0].options.redirect, 'error');
+    assert.equal(f.garageCalls()[0].options.redirect, 'manual');
     f.untouched();
   });
 }
@@ -147,6 +153,7 @@ test('owner is verified before shared VIN access; cache is hashed, positive-only
   assert.equal(f.calls[0].url.endsWith('/garage'), true);
   assert.equal(f.calls[1].url.includes(`vin=${VIN}`), true);
   assert.equal(f.calls[1].options.headers.Authorization, `Bearer ${TOKEN}`);
+  assert.equal(f.calls[1].options.redirect, 'manual');
   assert.ok(f.lookups.indexOf(membershipKey()) < f.lookups.indexOf(vehicleKey));
   assert.equal(f.objects.get(vehicleKey).values.has('nextAllowedAt'), true);
   assert.equal((await f.send()).status, 429);
@@ -164,6 +171,40 @@ test('owner is verified before shared VIN access; cache is hashed, positive-only
   assert.equal((await f.send()).status, 401);
   assert.equal(f.garageCalls().length, 2);
   assert.equal(f.lookups.filter(key => key === vehicleKey).length, previousLookups);
+});
+
+test('Ford auth redirect is returned as 401 without forwarding its destination', async t => {
+  const f = fixture(t, { telemetryRedirect: true });
+  const response = await f.send();
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: 'Ford authorization required',
+    code: 'ford_auth_redirect'
+  });
+  assert.equal(response.headers.get('Location'), null);
+  assert.equal(f.calls.at(-1).options.redirect, 'manual');
+  assert.equal(f.objects.get(membershipKey()).values.has('authorizedUntil'), false);
+  assert.equal(f.telemetryCalls().length, 1);
+});
+
+test('upstream gateway response and Retry-After are passed through for client backoff', async t => {
+  const f = fixture(t, { telemetryStatus: 502, telemetryRetryAfter: '45' });
+  const response = await f.send();
+
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get('Retry-After'), '45');
+  assert.equal(await response.text(), '{}');
+  assert.equal(f.calls.at(-1).options.redirect, 'manual');
+});
+
+test('telemetry transport exception becomes a generic proxy 502 without leaking details', async t => {
+  const f = fixture(t, { telemetryNetworkError: true });
+  const response = await f.send();
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: 'Proxy request failed' });
+  assert.equal(f.calls.at(-1).options.redirect, 'manual');
 });
 
 test('different verified owner tokens share the original VIN bucket', async t => {

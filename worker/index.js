@@ -300,8 +300,16 @@ export default {
 
         const fordResp = await fetch(`${FORD_DATA_BASE}/${suffix}`, {
           headers: { 'Authorization': auth, 'Accept': 'application/json' },
-          redirect: 'error'
+          // Never forward the bearer token to a redirect destination. Handle a
+          // Ford auth redirect as a credential failure instead of letting
+          // redirect:error turn it into a misleading proxy 502.
+          redirect: 'manual'
         });
+        if (fordResp.status >= 300 && fordResp.status < 400) {
+          if (membership) await membership.revokeAuthorization();
+          try { await fordResp.body?.cancel(); } catch { /* release is best-effort */ }
+          return json(env, request, 401, { error: 'Ford authorization required', code: 'ford_auth_redirect' });
+        }
         if (membership && (fordResp.status === 401 || fordResp.status === 403)) {
           await membership.revokeAuthorization();
         }
