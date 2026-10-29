@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { handleInstallationRequest, verifyFordAuthorization } from './installations.js';
+import { handleInstallationRequest, verifyFordAuthorization, fordGarageVehicles } from './installations.js';
 import { runScheduledMonitoring } from './monitoring.js';
 
 // Lightning Rod token/data proxy — Cloudflare Worker port of server/index.js.
@@ -150,7 +150,7 @@ async function authorizeVIN(env, request, token, vin) {
     if (verification.error === 'rejected') {
       return { response: json(env, request, 401, { error: 'Ford authorization required' }) };
     }
-    const vehicles = verification.garage?.vehicles;
+    const vehicles = fordGarageVehicles(verification.garage);
     const invalidGarage = !Array.isArray(vehicles) || vehicles.some(vehicle =>
       !vehicle || typeof vehicle.vin !== 'string' || !VIN_PATTERN.test(vehicle.vin));
     if (verification.error || invalidGarage) {

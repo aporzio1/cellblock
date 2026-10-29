@@ -192,7 +192,9 @@ async function encryptRefreshToken(refreshToken, encodedKey) {
 // Accepted upstream contract (fail closed on anything else):
 //   - exactly HTTP 200 (202, 3xx, 4xx, 5xx are all rejected)
 //   - a JSON media type: application/json or a structured <type>+json
-//   - a body of at most FORD_GARAGE_MAX_BODY_BYTES that parses to a JSON object
+//   - a body of at most FORD_GARAGE_MAX_BODY_BYTES that parses to a supported
+//     garage shape: a flat single-vehicle object, a top-level vehicle array,
+//     or an object with a `vehicles` / `data` array
 //   - no redirects are followed; any 3xx is treated as an authentication
 //     rejection so an expired Ford link reaches the app as 401, not 502/503
 //
@@ -201,8 +203,7 @@ async function encryptRefreshToken(refreshToken, encodedKey) {
 //   - anything else that is not a
 //     verified 200 JSON object      -> 'unavailable' (429 on upstream throttling,
 //     503 otherwise)
-//   - 200 JSON that is not an
-//     object (null/scalar/array)    -> 'invalid'     (503 to the client)
+//   - 200 JSON without a supported garage shape -> 'invalid' (503 to the client)
 //
 // On every early rejection (non-200 status, non-JSON media type, or an
 // oversized/failed body) the fetch signal is aborted and the unconsumed body
@@ -234,6 +235,26 @@ function isJsonMediaType(contentType) {
   // A JSON media type is exactly application/json, or a structured type whose
   // suffix is the registered +json suffix.
   return (type === 'application' && subtype === 'json' && suffix === null) || suffix === 'json';
+}
+
+const FORD_GARAGE_VIN_PATTERN = /^[A-HJ-NPR-Z0-9]{17}$/;
+
+// Ford has returned a flat single-vehicle object as well as list wrappers.
+// Normalize only documented shapes; authorization still requires an exact VIN.
+export function fordGarageVehicles(garage) {
+  if (Array.isArray(garage)) return garage;
+  if (!garage || typeof garage !== 'object') return null;
+  if (Array.isArray(garage.vehicles)) return garage.vehicles;
+  if (Array.isArray(garage.data)) return garage.data;
+  if (typeof garage.vin === 'string') return [garage];
+  return null;
+}
+
+function hasSupportedGarageShape(garage) {
+  const vehicles = fordGarageVehicles(garage);
+  return vehicles !== null && vehicles.every(vehicle =>
+    vehicle && typeof vehicle === 'object' && !Array.isArray(vehicle) &&
+    typeof vehicle.vin === 'string' && FORD_GARAGE_VIN_PATTERN.test(vehicle.vin));
 }
 
 // Read the response body into a byte buffer, enforcing maxBytes. Honors
@@ -356,12 +377,10 @@ export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = 
     } catch {
       return { error: 'invalid', stage: 'json_parse', upstreamStatus: garageResponse.status };
     }
-    // A garage document is a JSON object; null, scalars and bare arrays are
-    // malformed and must not be treated as proof of membership.
-    if (!garage || typeof garage !== 'object' || Array.isArray(garage)) {
+    if (!hasSupportedGarageShape(garage)) {
       return { error: 'invalid', stage: 'schema', upstreamStatus: garageResponse.status };
     }
-    return { garage };
+    return { garage, upstreamStatus: garageResponse.status };
   } finally {
     clearTimeout(timer);
   }

@@ -491,6 +491,21 @@ test('bootstrap mints installation state only after verified Ford authorization'
   assert.equal(calls.length, 1);
 });
 
+for (const garage of [
+  { vin: '1FTVW1ELXPWG00001' },
+  [{ vin: '1FTVW1ELXPWG00001' }],
+  { data: [{ vin: '1FTVW1ELXPWG00001' }] }
+]) {
+  test(`bootstrap accepts Ford garage shape ${JSON.stringify(garage).replace('1FTVW1ELXPWG00001', '<VIN>')}`, async () => {
+    const targetEnv = env();
+    const { fetchImpl } = garageFetch(200, JSON.stringify(garage));
+    const response = await handleInstallationRequest(
+      bootstrapRequest('verified-ford-access-token'), targetEnv, { fetchImpl });
+    assert.equal(response.status, 200);
+    assert.equal(targetEnv.INSTALLATIONS.values.size, 2);
+  });
+}
+
 test('bootstrap sends the raw Ford bearer to the garage endpoint with the Bearer scheme', async () => {
   const targetEnv = env();
   const fordToken = 'contract-check-token';
