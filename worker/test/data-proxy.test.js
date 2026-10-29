@@ -24,7 +24,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const vehicleKey = hash(`vehicle:${VIN}`);
 const membershipKey = (token = TOKEN, vin = VIN) => hash(`vin-authorization:${JSON.stringify([token, vin])}`);
 
-function fixture(t, { garageStatus = 200, garageBody = { vehicles: [{ vin: VIN }] }, telemetryStatus = 200, telemetryRetryAfter, telemetryRedirect = false, telemetryNetworkError = false, networkError = false } = {}) {
+function fixture(t, { garageStatus = 200, garageBody = { vehicles: [{ vin: VIN }] }, garageRetryAfter, telemetryStatus = 200, telemetryRetryAfter, telemetryRedirect = false, telemetryNetworkError = false, networkError = false } = {}) {
   let now = 1_800_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const objects = new Map();
@@ -55,13 +55,15 @@ function fixture(t, { garageStatus = 200, garageBody = { vehicles: [{ vin: VIN }
       }
     }
   };
-  const state = { garageStatus, garageBody, telemetryStatus, telemetryRetryAfter, telemetryRedirect, telemetryNetworkError, networkError };
+  const state = { garageStatus, garageBody, garageRetryAfter, telemetryStatus, telemetryRetryAfter, telemetryRedirect, telemetryNetworkError, networkError };
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     calls.push({ url: String(url), options });
     if (String(url).endsWith('/garage')) {
       if (state.networkError) throw new Error('dummy network failure');
+      const headers = { 'Content-Type': 'application/json' };
+      if (state.garageRetryAfter) headers['Retry-After'] = state.garageRetryAfter;
       return new Response(typeof state.garageBody === 'string' ? state.garageBody : JSON.stringify(state.garageBody), {
-        status: state.garageStatus, headers: { 'Content-Type': 'application/json' }
+        status: state.garageStatus, headers
       });
     }
     if (state.telemetryRedirect) {
@@ -110,7 +112,7 @@ for (const query of ['vin=', 'vin=short', `vin=${VIN.toLowerCase()}`, 'vin=1FTVW
   });
 }
 
-for (const [garageStatus, expected] of [[401, 401], [403, 401], [429, 503], [500, 503], [503, 503], [302, 401], [202, 503]]) {
+for (const [garageStatus, expected] of [[401, 401], [403, 401], [429, 429], [500, 503], [503, 503], [302, 401], [202, 503]]) {
   test(`Ford garage ${garageStatus} fails closed`, async t => {
     const f = fixture(t, { garageStatus });
     const response = await f.send();
@@ -118,6 +120,18 @@ for (const [garageStatus, expected] of [[401, 401], [403, 401], [429, 503], [500
     assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://cellblock.cc');
     assert.equal(f.garageCalls().length, 1);
     assert.equal(f.garageCalls()[0].options.redirect, 'manual');
+    f.untouched();
+  });
+}
+
+for (const status of [429, 503]) {
+  test(`Ford garage ${status} preserves Retry-After before telemetry`, async t => {
+    const f = fixture(t, { garageStatus: status, garageRetryAfter: '60' });
+    const response = await f.send();
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get('Retry-After'), '60');
+    assert.deepEqual(await response.json(), { error: 'Authorization service unavailable' });
+    assert.equal(f.telemetryCalls().length, 0);
     f.untouched();
   });
 }

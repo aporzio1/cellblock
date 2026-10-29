@@ -50,11 +50,12 @@ const VALID_GARAGE = JSON.stringify({
   vehicles: [{ vin: '1FTVW1ELXPWG00001', year: 2020, make: 'Ford', model: 'F-150' }]
 });
 
-function garageFetch(status = 200, body = VALID_GARAGE) {
+function garageFetch(status = 200, body = VALID_GARAGE, extraHeaders = {}) {
   const calls = [];
+  const headers = { 'Content-Type': 'application/json', ...extraHeaders };
   const fetchImpl = async (url, options) => {
     calls.push({ url: String(url), options });
-    return new Response(body, { status, headers: { 'Content-Type': 'application/json' } });
+    return new Response(body, { status, headers });
   };
   return { fetchImpl, calls };
 }
@@ -425,12 +426,14 @@ test('bootstrap fails closed when the garage endpoint returns 5xx and writes not
   assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
 });
 
-test('bootstrap fails closed when the garage endpoint is rate-limited and writes nothing', async () => {
+test('bootstrap preserves Ford rate limits and Retry-After while failing closed', async () => {
   const targetEnv = env();
-  const { fetchImpl } = garageFetch(429, '');
+  const { fetchImpl } = garageFetch(429, '', { 'Retry-After': '60' });
   const response = await handleInstallationRequest(
     bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
-  assert.equal(response.status, 503);
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get('Retry-After'), '60');
+  assert.deepEqual(await response.json(), { error: 'Authorization service unavailable' });
   assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
 });
 

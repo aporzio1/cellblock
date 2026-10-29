@@ -32,15 +32,21 @@ function corsHeaders(env, request) {
   };
 }
 
-function response(env, request, status, body) {
+function response(env, request, status, body, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders(env, request) }
+    headers: { 'Content-Type': 'application/json', ...corsHeaders(env, request), ...extraHeaders }
   });
 }
 
 function configurationError(env, request) {
   return response(env, request, 503, { error: 'Installation storage is not configured' });
+}
+
+function retryAfterHeaders(value) {
+  if (typeof value !== 'string' || value.length > 128 ||
+      value.includes(String.fromCharCode(10)) || value.includes(String.fromCharCode(13))) return {};
+  return { 'Retry-After': value };
 }
 
 function hasKv(env) {
@@ -193,7 +199,8 @@ async function encryptRefreshToken(refreshToken, encodedKey) {
 // Failure mapping:
 //   - 401/403 or redirect from Ford -> 'rejected'    (401 to the client)
 //   - anything else that is not a
-//     verified 200 JSON object      -> 'unavailable' (503 to the client)
+//     verified 200 JSON object      -> 'unavailable' (429 on upstream throttling,
+//     503 otherwise)
 //   - 200 JSON that is not an
 //     object (null/scalar/array)    -> 'invalid'     (503 to the client)
 //
@@ -309,7 +316,7 @@ export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = 
       });
     } catch {
       // Network, DNS, TLS or fetch failures are upstream unavailability.
-      return { error: 'unavailable' };
+      return { error: 'unavailable', stage: controller.signal.aborted ? 'timeout' : 'transport' };
     }
 
     if (garageResponse.status >= 300 && garageResponse.status < 400) {
@@ -321,11 +328,17 @@ export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = 
     // any other status means the authorization service is unavailable.
     if (garageResponse.status !== 200) {
       await releaseRejectedResponse(garageResponse, controller);
-      return { error: garageResponse.status === 401 || garageResponse.status === 403 ? 'rejected' : 'unavailable' };
+      if (garageResponse.status === 401 || garageResponse.status === 403) return { error: 'rejected' };
+      return {
+        error: 'unavailable',
+        stage: 'upstream_status',
+        upstreamStatus: garageResponse.status,
+        retryAfter: garageResponse.headers.get('Retry-After') || undefined
+      };
     }
     if (!isJsonMediaType(garageResponse.headers.get('content-type'))) {
       await releaseRejectedResponse(garageResponse, controller);
-      return { error: 'unavailable' };
+      return { error: 'unavailable', stage: 'content_type', upstreamStatus: garageResponse.status };
     }
 
     let bodyBytes;
@@ -334,19 +347,19 @@ export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = 
     } catch {
       // Timeout (abort), oversized body, or a mid-stream failure.
       await releaseRejectedResponse(garageResponse, controller);
-      return { error: 'unavailable' };
+      return { error: 'unavailable', stage: controller.signal.aborted ? 'timeout' : 'body_read', upstreamStatus: garageResponse.status };
     }
 
     let garage;
     try {
       garage = JSON.parse(new TextDecoder().decode(bodyBytes));
     } catch {
-      return { error: 'invalid' };
+      return { error: 'invalid', stage: 'json_parse', upstreamStatus: garageResponse.status };
     }
     // A garage document is a JSON object; null, scalars and bare arrays are
     // malformed and must not be treated as proof of membership.
     if (!garage || typeof garage !== 'object' || Array.isArray(garage)) {
-      return { error: 'invalid' };
+      return { error: 'invalid', stage: 'schema', upstreamStatus: garageResponse.status };
     }
     return { garage };
   } finally {
@@ -364,9 +377,20 @@ async function bootstrap(env, request, fetchImpl = fetch, timeoutMs = FORD_GARAG
     return response(env, request, 401, { error: 'Ford authorization required' });
   }
   if (verification.error === 'unavailable') {
-    return response(env, request, 503, { error: 'Authorization service unavailable' });
+    console.warn('Ford installation authorization unavailable', {
+      stage: verification.stage || 'unknown',
+      upstreamStatus: verification.upstreamStatus || null,
+      retryAfterPresent: Boolean(verification.retryAfter)
+    });
+    const status = verification.upstreamStatus === 429 ? 429 : 503;
+    const headers = verification.retryAfter ? retryAfterHeaders(verification.retryAfter) : {};
+    return response(env, request, status, { error: 'Authorization service unavailable' }, headers);
   }
   if (verification.error === 'invalid') {
+    console.warn('Ford installation authorization invalid', {
+      stage: verification.stage || 'unknown',
+      upstreamStatus: verification.upstreamStatus || null
+    });
     return response(env, request, 503, { error: 'Invalid authorization response' });
   }
 
