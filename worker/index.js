@@ -93,10 +93,10 @@ function enforceOrigin(env, request) {
   return null;
 }
 
-function json(env, request, status, obj) {
+function json(env, request, status, obj, extraHeaders = {}) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders(env, request) }
+    headers: { 'Content-Type': 'application/json', ...corsHeaders(env, request), ...extraHeaders }
   });
 }
 
@@ -106,6 +106,12 @@ function retryAfterMilliseconds(value) {
   if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
   const date = Date.parse(value);
   return Number.isFinite(date) ? Math.max(0, date - Date.now()) : FORD_REQUEST_INTERVAL_MS;
+}
+
+function retryAfterHeaders(value) {
+  if (typeof value !== 'string' || value.length > 128 ||
+      value.includes(String.fromCharCode(10)) || value.includes(String.fromCharCode(13))) return {};
+  return { 'Retry-After': value };
 }
 
 const VIN_PATTERN = /^[A-HJ-NPR-Z0-9]{17}$/;
@@ -145,16 +151,30 @@ async function authorizeVIN(env, request, token, vin) {
       return { response: json(env, request, 401, { error: 'Ford authorization required' }) };
     }
     const vehicles = verification.garage?.vehicles;
-    if (verification.error || !Array.isArray(vehicles) || vehicles.some(vehicle =>
-      !vehicle || typeof vehicle.vin !== 'string' || !VIN_PATTERN.test(vehicle.vin))) {
-      return { response: json(env, request, 503, { error: 'Authorization service unavailable' }) };
+    const invalidGarage = !Array.isArray(vehicles) || vehicles.some(vehicle =>
+      !vehicle || typeof vehicle.vin !== 'string' || !VIN_PATTERN.test(vehicle.vin));
+    if (verification.error || invalidGarage) {
+      const stage = verification.stage || (verification.error === 'invalid' ? 'invalid_response' : 'garage_schema');
+      console.warn('Ford VIN authorization unavailable', {
+        stage,
+        upstreamStatus: verification.upstreamStatus || null,
+        retryAfterPresent: Boolean(verification.retryAfter)
+      });
+      const status = verification.upstreamStatus === 429 ? 429 : 503;
+      return {
+        response: json(env, request, status, { error: 'Authorization service unavailable' }, retryAfterHeaders(verification.retryAfter))
+      };
     }
     if (!vehicles.some(vehicle => vehicle.vin === vin)) {
       return { response: json(env, request, 403, { error: 'Vehicle authorization required' }) };
     }
     await membership.authorize();
     return { membership };
-  } catch {
+  } catch (error) {
+    console.error('Ford VIN authorization check failed', {
+      stage: 'worker_internal',
+      errorName: error instanceof Error ? error.name : 'UnknownError'
+    });
     return { response: json(env, request, 503, { error: 'Authorization service unavailable' }) };
   }
 }
@@ -309,6 +329,13 @@ export default {
           if (membership) await membership.revokeAuthorization();
           try { await fordResp.body?.cancel(); } catch { /* release is best-effort */ }
           return json(env, request, 401, { error: 'Ford authorization required', code: 'ford_auth_redirect' });
+        }
+        if (fordResp.status === 429 || fordResp.status >= 500) {
+          console.warn('Ford telemetry upstream response', {
+            path: url.pathname,
+            status: fordResp.status,
+            retryAfterPresent: Boolean(fordResp.headers.get('Retry-After'))
+          });
         }
         if (membership && (fordResp.status === 401 || fordResp.status === 403)) {
           await membership.revokeAuthorization();
