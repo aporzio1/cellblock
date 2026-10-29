@@ -136,13 +136,32 @@ for (const status of [429, 503]) {
   });
 }
 
-for (const garageBody of ['{broken', null, [], {}, { vehicles: {} }, { vehicles: [null] }, { vehicles: [{ vin: 1 }] }]) {
+for (const garageBody of ['{broken', null, {}, { vehicles: {} }, { vehicles: [null] }, { vehicles: [{ vin: 1 }] }]) {
   test(`malformed garage fails closed: ${JSON.stringify(garageBody)}`, async t => {
     const f = fixture(t, { garageBody });
     assert.equal((await f.send()).status, 503);
     f.untouched();
   });
 }
+
+for (const garageBody of [
+  { vin: VIN },
+  [{ vin: VIN }],
+  { data: [{ vin: VIN }] }
+]) {
+  test(`Ford garage supported shape authorizes exact VIN: ${JSON.stringify(garageBody).replace(VIN, '<VIN>')}`, async t => {
+    const f = fixture(t, { garageBody });
+    assert.equal((await f.send()).status, 200);
+    assert.equal(f.garageCalls().length, 1);
+    assert.equal(f.telemetryCalls().length, 1);
+  });
+}
+
+test('empty Ford garage is valid but grants no vehicle authorization', async t => {
+  const f = fixture(t, { garageBody: [] });
+  assert.equal((await f.send()).status, 403);
+  f.untouched();
+});
 
 test('network failure and unavailable authorization storage fail closed', async t => {
   const f = fixture(t, { networkError: true });
