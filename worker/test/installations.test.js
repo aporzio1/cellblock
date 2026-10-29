@@ -511,32 +511,29 @@ test('bootstrap without a bearer never contacts Ford and writes nothing', async 
   assert.equal(calls.length, 0);
 });
 
-// F02 code-quality remediation: reject redirects, bound the upstream deadline
-// and body, and enforce the exact 200 + JSON contract. Every path below must
-// fail closed (503) with zero KV writes, before any credential is minted.
+// F02 code-quality remediation: never follow redirects, bound the upstream deadline
+// and body, and enforce the exact 200 + JSON contract. Redirects indicate that
+// Ford requires reauthentication; every other non-200 fails closed.
 
-test('bootstrap rejects redirects: asserts redirect:error and fails a 302 with no writes', async () => {
+test('bootstrap maps Ford redirects to authentication required without following them', async () => {
   const targetEnv = env();
   const { fetchImpl, calls } = garageStub({ status: 302, contentType: 'application/json', body: VALID_GARAGE });
   const response = await handleInstallationRequest(
     bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
-  // The fetch must be told to error on redirects rather than follow them.
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].options?.redirect, 'error');
-  // A 302 (redirect) is not a verified garage document: fail closed.
-  assert.equal(response.status, 503);
-  assert.deepEqual(await response.json(), { error: 'Authorization service unavailable' });
+  assert.equal(calls[0].options?.redirect, 'manual');
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Ford authorization required' });
   assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
 });
 
-test('bootstrap fails closed when the garage fetch throws a redirect error and writes nothing', async () => {
+test('bootstrap fails closed when the garage request itself fails and writes nothing', async () => {
   const targetEnv = env();
   const calls = [];
   const fetchImpl = async (url, options) => {
     calls.push({ url: String(url), options });
-    assert.equal(options?.redirect, 'error');
-    // undici throws a TypeError when redirect:'error' meets a 3xx.
-    throw new TypeError('fetch failed: redirect');
+    assert.equal(options?.redirect, 'manual');
+    throw new TypeError('simulated upstream network failure');
   };
   const response = await handleInstallationRequest(
     bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });

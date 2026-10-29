@@ -187,11 +187,11 @@ async function encryptRefreshToken(refreshToken, encodedKey) {
 //   - exactly HTTP 200 (202, 3xx, 4xx, 5xx are all rejected)
 //   - a JSON media type: application/json or a structured <type>+json
 //   - a body of at most FORD_GARAGE_MAX_BODY_BYTES that parses to a JSON object
-//   - no redirects (redirect: 'error'); a redirect is a network failure
-//   - the whole exchange (headers + body) completes within the deadline
+//   - no redirects are followed; any 3xx is treated as an authentication
+//     rejection so an expired Ford link reaches the app as 401, not 502/503
 //
 // Failure mapping:
-//   - 401/403 from Ford            -> 'rejected'    (401 to the client)
+//   - 401/403 or redirect from Ford -> 'rejected'    (401 to the client)
 //   - anything else that is not a
 //     verified 200 JSON object      -> 'unavailable' (503 to the client)
 //   - 200 JSON that is not an
@@ -304,16 +304,21 @@ export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = 
     try {
       garageResponse = await fetchImpl(FORD_GARAGE_URL, {
         headers: { Authorization: `Bearer ${fordToken}`, Accept: 'application/json' },
-        redirect: 'error',
+        redirect: 'manual',
         signal: controller.signal
       });
     } catch {
-      // Network failure, DNS/TLS error, or a redirect (redirect: 'error').
+      // Network, DNS, TLS or fetch failures are upstream unavailability.
       return { error: 'unavailable' };
     }
 
-    // Contract: exactly HTTP 200. 401/403 mean Ford rejected the bearer;
-    // every other status (202, 3xx, 4xx, 5xx) is an unavailable upstream.
+    if (garageResponse.status >= 300 && garageResponse.status < 400) {
+      await releaseRejectedResponse(garageResponse, controller);
+      return { error: 'rejected' };
+    }
+
+    // Contract: exactly HTTP 200; 401/403 mean Ford rejected the bearer, and
+    // any other status means the authorization service is unavailable.
     if (garageResponse.status !== 200) {
       await releaseRejectedResponse(garageResponse, controller);
       return { error: garageResponse.status === 401 || garageResponse.status === 403 ? 'rejected' : 'unavailable' };
