@@ -1115,8 +1115,16 @@ function renderChargeSchedules(data) {
     const endTime = sched.endTime ?? sched.EndTime ?? '--';
     const chargeLimit = sched.chargeLimitPercentage ?? sched.chargeLimitPercent ?? sched.ChargeLimitPercentage ?? '--';
 
-    div.innerHTML = `<span class="info-label">${dayOfWeek}</span>
-      <span class="info-value">${startTime} – ${endTime}${chargeLimit != null ? ' · Limit: ' + chargeLimit + '%' : ''}${enabled !== undefined ? ' · ' + (enabled ? 'Enabled' : 'Disabled') : ''}</span>`;
+    const scheduleLabel = document.createElement('span');
+    scheduleLabel.className = 'info-label';
+    scheduleLabel.textContent = dayOfWeek;
+
+    const scheduleValue = document.createElement('span');
+    scheduleValue.className = 'info-value';
+    scheduleValue.textContent = `${startTime} – ${endTime}${chargeLimit != null ? ' · Limit: ' + chargeLimit + '%' : ''}${enabled !== undefined ? ' · ' + (enabled ? 'Enabled' : 'Disabled') : ''}`;
+
+    div.appendChild(scheduleLabel);
+    div.appendChild(scheduleValue);
     container.appendChild(div);
   }
 }
@@ -1150,8 +1158,16 @@ function renderDepartureTimes(data) {
     const time = dt.time ?? dt.Time ?? '--';
     const ac = dt.acPreconditioningEnabled ?? dt.ACPreconditioningEnabled ?? dt.acPreconditioning ?? dt.ACPreconditioning;
 
-    div.innerHTML = `<span class="info-label">${dayOfWeek}</span>
-      <span class="info-value">${time}${ac !== undefined ? ' · AC: ' + (ac ? 'On' : 'Off') : ''}${enabled !== undefined ? ' · ' + (enabled ? 'Enabled' : 'Disabled') : ''}</span>`;
+    const departureLabel = document.createElement('span');
+    departureLabel.className = 'info-label';
+    departureLabel.textContent = dayOfWeek;
+
+    const departureValue = document.createElement('span');
+    departureValue.className = 'info-value';
+    departureValue.textContent = `${time}${ac !== undefined ? ' · AC: ' + (ac ? 'On' : 'Off') : ''}${enabled !== undefined ? ' · ' + (enabled ? 'Enabled' : 'Disabled') : ''}`;
+
+    div.appendChild(departureLabel);
+    div.appendChild(departureValue);
     container.appendChild(div);
   }
 }
