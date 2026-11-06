@@ -111,7 +111,7 @@ for (const [garageStatus, expected] of [[401, 401], [403, 401], [429, 503], [500
     assert.equal(response.status, expected);
     assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://cellblock.cc');
     assert.equal(f.garageCalls().length, 1);
-    assert.equal(f.garageCalls()[0].options.redirect, 'error');
+    assert.equal(f.garageCalls()[0].options.redirect, 'follow');
     f.untouched();
   });
 }

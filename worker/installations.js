@@ -9,7 +9,7 @@ const FORD_GARAGE_URL = 'https://api.vehicle.ford.com/fcon-query/v1/garage';
 // Bounded upstream deadline for the garage verification: covers both the
 // response headers and the body read. Injectable in tests via
 // options.fordTimeoutMs; production uses this value.
-const FORD_GARAGE_TIMEOUT_MS = 10_000;
+const FORD_GARAGE_TIMEOUT_MS = 20_000;
 // Hard cap on the garage response body before it is JSON-parsed.
 const FORD_GARAGE_MAX_BODY_BYTES = 64 * 1024;
 // Bounded wait for cancelling a rejected upstream body. A stuck stream must
@@ -187,7 +187,8 @@ async function encryptRefreshToken(refreshToken, encodedKey) {
 //   - exactly HTTP 200 (202, 3xx, 4xx, 5xx are all rejected)
 //   - a JSON media type: application/json or a structured <type>+json
 //   - a body of at most FORD_GARAGE_MAX_BODY_BYTES that parses to a JSON object
-//   - no redirects (redirect: 'error'); a redirect is a network failure
+//   - redirects are followed (lane parity with the dashboard's proxied
+//     reads, 2026-11-06); the FINAL response must still be 200 JSON
 //   - the whole exchange (headers + body) completes within the deadline
 //
 // Failure mapping:
@@ -304,11 +305,11 @@ export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = 
     try {
       garageResponse = await fetchImpl(garageURL, {
         headers: { Authorization: `Bearer ${fordToken}`, Accept: 'application/json' },
-        redirect: 'error',
+        redirect: 'follow',
         signal: controller.signal
       });
     } catch {
-      // Network failure, DNS/TLS error, or a redirect (redirect: 'error').
+      // Network failure, DNS/TLS error, or deadline exceeded.
       return { error: 'unavailable' };
     }
 
