@@ -2,6 +2,20 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_AUTHORIZATION_BYTES = 8 * 1024;
 const REGISTERED_REDIRECT_URI = 'https://cellblock.cc/';
 const AUTHORIZATION_INDEX_KEY = 'ford-authorization-index';
+// Same garage contract the D1 backend uses (src/index.js): the raw Ford access
+// token is sent as a Bearer scheme; 200 + JSON object is the only accepted
+// success shape.
+const FORD_GARAGE_URL = 'https://api.vehicle.ford.com/fcon-query/v1/garage';
+// Bounded upstream deadline for the garage verification: covers both the
+// response headers and the body read. Injectable in tests via
+// options.fordTimeoutMs; production uses this value.
+const FORD_GARAGE_TIMEOUT_MS = 10_000;
+// Hard cap on the garage response body before it is JSON-parsed.
+const FORD_GARAGE_MAX_BODY_BYTES = 64 * 1024;
+// Bounded wait for cancelling a rejected upstream body. A stuck stream must
+// not hang the request, so the cancel is awaited only this long; the cancel
+// itself is still initiated deterministically.
+const FORD_GARAGE_CANCEL_TIMEOUT_MS = 1_000;
 import { encryptValue, validateVIN } from './monitoring.js';
 
 class BadRequest extends Error {}
@@ -166,10 +180,197 @@ async function encryptRefreshToken(refreshToken, encodedKey) {
   });
 }
 
-async function bootstrap(env, request) {
+// F02: prove the bearer to Ford before minting any installation credential.
+// The garage call is the same request the D1 backend makes (src/index.js).
+//
+// Accepted upstream contract (fail closed on anything else):
+//   - exactly HTTP 200 (202, 3xx, 4xx, 5xx are all rejected)
+//   - a JSON media type: application/json or a structured <type>+json
+//   - a body of at most FORD_GARAGE_MAX_BODY_BYTES that parses to a JSON object
+//   - no redirects (redirect: 'error'); a redirect is a network failure
+//   - the whole exchange (headers + body) completes within the deadline
+//
+// Failure mapping:
+//   - 401/403 from Ford            -> 'rejected'    (401 to the client)
+//   - anything else that is not a
+//     verified 200 JSON object      -> 'unavailable' (503 to the client)
+//   - 200 JSON that is not an
+//     object (null/scalar/array)    -> 'invalid'     (503 to the client)
+//
+// On every early rejection (non-200 status, non-JSON media type, or an
+// oversized/failed body) the fetch signal is aborted and the unconsumed body
+// stream is cancelled so the upstream connection is released; cancellation
+// failures are swallowed and the wait is bounded.
+//
+// Every failure path returns before random ID/token generation and before any
+// KV write. The raw bearer is sent only in the Authorization header to the
+// fixed Ford HTTPS URL.
+// A media type is `type "/" subtype` where both are RFC 7230 tokens, with an
+// optional RFC 6838 structured suffix ` "+" suffix` (also a token). Anything
+// else — a missing slash, an empty type/subtype, or a non-token character —
+// is malformed and must not be treated as a JSON media type.
+const MEDIA_TYPE_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+function isJsonMediaType(contentType) {
+  if (!contentType) return false;
+  const mediaType = contentType.split(';')[0].trim().toLowerCase();
+  const slash = mediaType.indexOf('/');
+  if (slash <= 0) return false;
+  const type = mediaType.slice(0, slash);
+  const rest = mediaType.slice(slash + 1);
+  if (!MEDIA_TYPE_TOKEN.test(type)) return false;
+  const plus = rest.indexOf('+');
+  const subtype = plus === -1 ? rest : rest.slice(0, plus);
+  const suffix = plus === -1 ? null : rest.slice(plus + 1);
+  if (!MEDIA_TYPE_TOKEN.test(subtype)) return false;
+  if (suffix !== null && !MEDIA_TYPE_TOKEN.test(suffix)) return false;
+  // A JSON media type is exactly application/json, or a structured type whose
+  // suffix is the registered +json suffix.
+  return (type === 'application' && subtype === 'json' && suffix === null) || suffix === 'json';
+}
+
+// Read the response body into a byte buffer, enforcing maxBytes. Honors
+// Content-Length when present (fast reject before reading); otherwise enforces
+// the cap while consuming the stream so a misleading/absent Content-Length
+// cannot smuggle an oversized body past the limit. Stream failures and aborts
+// propagate to the caller, which maps them to a closed failure.
+async function readBoundedBody(response, maxBytes) {
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error('garage response body exceeds limit');
+  }
+  if (!response.body) return new Uint8Array(0);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          // Stop consuming; discard the remainder and fail closed.
+          reader.cancel().catch(() => {});
+          throw new Error('garage response body exceeds limit');
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released */ }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+// Resolve with the promise's value, or reject after ms if it has not settled.
+// Used to bound the wait on a body cancel so a stuck stream cannot hang the
+// request. The underlying promise is left to settle on its own.
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('cancel timed out')), ms);
+    Promise.resolve(promise).then(
+      value => { clearTimeout(timer); resolve(value); },
+      error => { clearTimeout(timer); reject(error); }
+    );
+  });
+}
+
+// Deterministically release a rejected upstream response: abort the fetch
+// signal and cancel the body stream so the underlying connection is returned
+// to the pool. Cancellation failures are swallowed and the wait is bounded so
+// a stuck stream cannot hang the request. Safe to call on an already-consumed
+// or already-cancelled body (cancel is a no-op there).
+async function releaseRejectedResponse(response, controller) {
+  try { controller.abort(); } catch { /* already aborted */ }
+  const body = response && response.body;
+  if (!body || typeof body.cancel !== 'function') return;
+  try {
+    await withTimeout(body.cancel(), FORD_GARAGE_CANCEL_TIMEOUT_MS);
+  } catch { /* swallow cancellation failures */ }
+}
+
+export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = FORD_GARAGE_TIMEOUT_MS, garageURL = FORD_GARAGE_URL) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let garageResponse;
+    try {
+      garageResponse = await fetchImpl(garageURL, {
+        headers: { Authorization: `Bearer ${fordToken}`, Accept: 'application/json' },
+        redirect: 'error',
+        signal: controller.signal
+      });
+    } catch {
+      // Network failure, DNS/TLS error, or a redirect (redirect: 'error').
+      return { error: 'unavailable' };
+    }
+
+    // Contract: exactly HTTP 200. 401/403 mean Ford rejected the bearer;
+    // every other status (202, 3xx, 4xx, 5xx) is an unavailable upstream.
+    if (garageResponse.status !== 200) {
+      await releaseRejectedResponse(garageResponse, controller);
+      return { error: garageResponse.status === 401 || garageResponse.status === 403 ? 'rejected' : 'unavailable' };
+    }
+    if (!isJsonMediaType(garageResponse.headers.get('content-type'))) {
+      await releaseRejectedResponse(garageResponse, controller);
+      return { error: 'unavailable' };
+    }
+
+    let bodyBytes;
+    try {
+      bodyBytes = await readBoundedBody(garageResponse, FORD_GARAGE_MAX_BODY_BYTES);
+    } catch {
+      // Timeout (abort), oversized body, or a mid-stream failure.
+      await releaseRejectedResponse(garageResponse, controller);
+      return { error: 'unavailable' };
+    }
+
+    let garage;
+    try {
+      garage = JSON.parse(new TextDecoder().decode(bodyBytes));
+    } catch {
+      return { error: 'invalid' };
+    }
+    // A garage document is a JSON object; null, scalars and bare arrays are
+    // malformed and must not be treated as proof of membership.
+    if (!garage || typeof garage !== 'object' || Array.isArray(garage)) {
+      return { error: 'invalid' };
+    }
+    return { garage };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function bootstrap(env, request, fetchImpl = fetch, timeoutMs = FORD_GARAGE_TIMEOUT_MS) {
   const fordToken = parseBearer(request);
   if (!fordToken) return response(env, request, 401, { error: 'Ford authorization is required' });
   if (!hasKv(env)) return configurationError(env, request);
+
+  // Verified 2026-11-06: this Worker's direct egress to api.vehicle.ford.com
+  // fails at fetch level for the garage route (diagnostic:bootstrap-verify,
+  // stage 'fetch'), while the proxy lane reaches Ford reliably and already
+  // forwards the caller's bearer. Verify through the proxy so enrollment
+  // depends only on the lane the dashboard already trusts. The shared VIN
+  // limiter budgets this like any other dashboard read.
+  const garageBase = env.FORD_PROXY_BASE || 'https://proxy.cellblock.cc/api/data';
+  const verification = await verifyFordAuthorization(fordToken, fetchImpl, timeoutMs, `${garageBase}/garage`);
+  if (verification.error === 'rejected') {
+    return response(env, request, 401, { error: 'Ford authorization required' });
+  }
+  if (verification.error === 'unavailable') {
+    return response(env, request, 503, { error: 'Authorization service unavailable' });
+  }
+  if (verification.error === 'invalid') {
+    return response(env, request, 503, { error: 'Invalid authorization response' });
+  }
 
   const installationID = crypto.randomUUID();
   const token = randomToken();
@@ -392,7 +593,11 @@ async function authorize(env, request) {
   }
 }
 
-export async function handleInstallationRequest(request, env) {
+// options.fetchImpl is a test seam (same pattern as runScheduledMonitoring);
+// production callers omit it and the global fetch is used. options.fordTimeoutMs
+// is an optional upstream deadline override for the garage verification;
+// production callers omit it and FORD_GARAGE_TIMEOUT_MS is used.
+export async function handleInstallationRequest(request, env, options = {}) {
   const { pathname } = new URL(request.url);
   const installationRoute = pathname === '/api/installations/bootstrap';
   const enrollmentRoute = pathname === '/api/live-activities/enroll';
@@ -416,7 +621,7 @@ export async function handleInstallationRequest(request, env) {
   if (capabilityRoute && request.method !== 'GET') return response(env, request, 404, { error: 'Not found' });
 
   try {
-    if (installationRoute) return bootstrap(env, request);
+    if (installationRoute) return bootstrap(env, request, options.fetchImpl || fetch, options.fordTimeoutMs);
     if (enrollmentRoute) return enroll(env, request);
     if (deleteEnrollmentRoute) return deleteEnrollment(env, request, pathname);
     if (tokenRoute) return registerToken(env, request);

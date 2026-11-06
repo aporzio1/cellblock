@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { handleInstallationRequest } from './installations.js';
+import { handleInstallationRequest, verifyFordAuthorization } from './installations.js';
 import { runScheduledMonitoring } from './monitoring.js';
 
 // Lightning Rod token/data proxy — Cloudflare Worker port of server/index.js.
@@ -23,11 +23,11 @@ const FORD_BUILDER_URL = 'https://build.ford.com/dig/direct/HD-FULL/Vin[VIN]/EXT
 const DATA_PREFIX = '/api/data/';
 const REGISTERED_REDIRECT_URI = 'https://cellblock.cc/';
 const FORD_REQUEST_INTERVAL_MS = 30_000;
+const VIN_AUTHORIZATION_TTL_MS = 5 * 60_000;
 
-// One Durable Object per active Ford bearer token serializes requests from
-// separate browser tabs. The Worker stores only a SHA-256 digest, never the
-// token itself. A token refresh creates a new limiter identity, while the
-// browser queue prevents an immediate same-tab burst during that transition.
+// Separate hashed identities for verified vehicles, non-VIN tokens, and
+// authorization-check IPs. Membership proof uses a token+VIN object, never
+// the shared vehicle object. No raw bearer or VIN is persisted.
 // Extending DurableObject is required for `stub.allow()` / `stub.defer()` RPC.
 export class FordRateLimiter extends DurableObject {
   constructor(ctx, env) {
@@ -52,6 +52,18 @@ export class FordRateLimiter extends DurableObject {
     const nextAllowedAt = this.ctx.storage.kv.get('nextAllowedAt') || 0;
     const deferredUntil = now + Math.max(retryAfterMs, FORD_REQUEST_INTERVAL_MS);
     this.ctx.storage.kv.put('nextAllowedAt', Math.max(nextAllowedAt, deferredUntil));
+  }
+
+  hasAuthorization() {
+    return (this.ctx.storage.kv.get('authorizedUntil') || 0) > Date.now();
+  }
+
+  authorize() {
+    this.ctx.storage.kv.put('authorizedUntil', Date.now() + VIN_AUTHORIZATION_TTL_MS);
+  }
+
+  revokeAuthorization() {
+    this.ctx.storage.kv.delete('authorizedUntil');
   }
 }
 
@@ -96,22 +108,55 @@ function retryAfterMilliseconds(value) {
   return Number.isFinite(date) ? Math.max(0, date - Date.now()) : FORD_REQUEST_INTERVAL_MS;
 }
 
-const VIN_PATTERN = /^[A-Z0-9]{17}$/;
+const VIN_PATTERN = /^[A-HJ-NPR-Z0-9]{17}$/;
 
 // Ford's request budget is per vehicle. Telemetry reads carry a vin param,
 // so those requests share one limiter bucket keyed by VIN — that is how the
 // iOS app and the Live Activities cron serialize instead of blindly
 // competing for the same budget. Paths without a vin fall back to the
 // per-token bucket.
-async function limiterFor(env, request) {
-  const vin = new URL(request.url).searchParams.get('vin') || '';
-  const digestInput = VIN_PATTERN.test(vin)
-    ? `vehicle:${vin}`
-    : `token:${request.headers.get('authorization') || ''}`;
+async function objectFor(env, digestInput) {
   const data = new TextEncoder().encode(digestInput);
   const digest = await crypto.subtle.digest('SHA-256', data);
   const key = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
   return env.FORD_RATE_LIMITER.get(env.FORD_RATE_LIMITER.idFromName(key));
+}
+
+// Fail closed BEFORE even looking up the shared vehicle limiter. Durable
+// Object storage (rather than eventually consistent KV) makes revocation
+// visible on the next request across locations. Only positive proof is cached.
+async function authorizeVIN(env, request, token, vin) {
+  try {
+    const membership = await objectFor(env, `vin-authorization:${JSON.stringify([token, vin])}`);
+    if (await membership.hasAuthorization()) return { membership };
+
+    // Cloudflare supplies this header at ingress. Never trust X-Forwarded-For
+    // or a caller-selected token/VIN for this budget. Missing ingress identity
+    // gets a single shared fallback, not an unlimited/new bucket per request.
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown-ingress';
+    const validationLimiter = await objectFor(env, `vin-authorization-ip:${ip}`);
+    const permission = await validationLimiter.allow();
+    if (!permission.allowed) {
+      return { response: rateLimitedResponse(env, request, permission.retryAfterMs) };
+    }
+
+    const verification = await verifyFordAuthorization(token, fetch);
+    if (verification.error === 'rejected') {
+      return { response: json(env, request, 401, { error: 'Ford authorization required' }) };
+    }
+    const vehicles = verification.garage?.vehicles;
+    if (verification.error || !Array.isArray(vehicles) || vehicles.some(vehicle =>
+      !vehicle || typeof vehicle.vin !== 'string' || !VIN_PATTERN.test(vehicle.vin))) {
+      return { response: json(env, request, 503, { error: 'Authorization service unavailable' }) };
+    }
+    if (!vehicles.some(vehicle => vehicle.vin === vin)) {
+      return { response: json(env, request, 403, { error: 'Vehicle authorization required' }) };
+    }
+    await membership.authorize();
+    return { membership };
+  } catch {
+    return { response: json(env, request, 503, { error: 'Authorization service unavailable' }) };
+  }
 }
 
 function rateLimitedResponse(env, request, retryAfterMs) {
@@ -233,17 +278,33 @@ export default {
       if (request.method === 'GET' && url.pathname.startsWith(DATA_PREFIX)) {
         const suffix = url.pathname.slice(DATA_PREFIX.length) + url.search;
         const auth = request.headers.get('authorization');
-        if (!auth) return json(env, request, 401, { error: 'Authorization header is required' });
+        const bearer = auth && auth.length <= 8192 && /^Bearer ([A-Za-z0-9._~+/-]+=*)$/i.exec(auth);
+        if (!bearer) return json(env, request, 401, { error: 'Ford authorization required' });
 
-        const limiter = await limiterFor(env, request);
+        const vins = url.searchParams.getAll('vin');
+        if (vins.length > 1 || (vins.length === 1 && !VIN_PATTERN.test(vins[0]))) {
+          return json(env, request, 400, { error: 'Invalid vin parameter' });
+        }
+        const vin = vins[0];
+        let membership;
+        if (vin !== undefined) {
+          const proof = await authorizeVIN(env, request, bearer[1], vin);
+          if (proof.response) return proof.response;
+          membership = proof.membership;
+        }
+        const limiter = await objectFor(env, vin === undefined ? `token:${auth}` : `vehicle:${vin}`);
         const permission = await limiter.allow();
         if (!permission.allowed) {
           return rateLimitedResponse(env, request, permission.retryAfterMs);
         }
 
         const fordResp = await fetch(`${FORD_DATA_BASE}/${suffix}`, {
-          headers: { 'Authorization': auth, 'Accept': 'application/json' }
+          headers: { 'Authorization': auth, 'Accept': 'application/json' },
+          redirect: 'error'
         });
+        if (membership && (fordResp.status === 401 || fordResp.status === 403)) {
+          await membership.revokeAuthorization();
+        }
         const body = await fordResp.text();
         const headers = {
           'Content-Type': fordResp.headers.get('content-type') || 'application/json',
