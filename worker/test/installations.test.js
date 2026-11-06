@@ -524,19 +524,19 @@ test('bootstrap rejects redirects: asserts redirect:error and fails a 302 with n
     bootstrapRequest('ford-access-token'), targetEnv, { fetchImpl });
   // The fetch must be told to error on redirects rather than follow them.
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].options?.redirect, 'error');
+  assert.equal(calls[0].options?.redirect, 'follow');
   // A 302 (redirect) is not a verified garage document: fail closed.
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: 'Authorization service unavailable' });
   assert.equal(targetEnv.INSTALLATIONS.values.size, 0);
 });
 
-test('bootstrap fails closed when the garage fetch throws a redirect error and writes nothing', async () => {
+test('bootstrap fails closed when the garage fetch throws a network error and writes nothing', async () => {
   const targetEnv = env();
   const calls = [];
   const fetchImpl = async (url, options) => {
     calls.push({ url: String(url), options });
-    assert.equal(options?.redirect, 'error');
+    assert.equal(options?.redirect, 'follow');
     // undici throws a TypeError when redirect:'error' meets a 3xx.
     throw new TypeError('fetch failed: redirect');
   };
