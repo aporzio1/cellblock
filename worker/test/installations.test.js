@@ -494,7 +494,9 @@ test('bootstrap sends the raw Ford bearer to the garage endpoint with the Bearer
   const { fetchImpl, calls } = garageFetch();
   await handleInstallationRequest(bootstrapRequest(fordToken), targetEnv, { fetchImpl });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, 'https://api.vehicle.ford.com/fcon-query/v1/garage');
+  // Enrollment verification rides the proxy lane (verified 2026-11-06: direct
+  // egress to Ford's garage route fails at fetch level from this Worker).
+  assert.equal(calls[0].url, 'https://proxy.cellblock.cc/api/data/garage');
   const headers = new Headers(calls[0].options?.headers || {});
   assert.equal(headers.get('authorization'), 'Bearer ' + fordToken);
   assert.equal(headers.get('accept'), 'application/json');

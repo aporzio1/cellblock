@@ -296,13 +296,13 @@ async function releaseRejectedResponse(response, controller) {
   } catch { /* swallow cancellation failures */ }
 }
 
-export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = FORD_GARAGE_TIMEOUT_MS) {
+export async function verifyFordAuthorization(fordToken, fetchImpl, timeoutMs = FORD_GARAGE_TIMEOUT_MS, garageURL = FORD_GARAGE_URL) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     let garageResponse;
     try {
-      garageResponse = await fetchImpl(FORD_GARAGE_URL, {
+      garageResponse = await fetchImpl(garageURL, {
         headers: { Authorization: `Bearer ${fordToken}`, Accept: 'application/json' },
         redirect: 'error',
         signal: controller.signal
@@ -354,7 +354,14 @@ async function bootstrap(env, request, fetchImpl = fetch, timeoutMs = FORD_GARAG
   if (!fordToken) return response(env, request, 401, { error: 'Ford authorization is required' });
   if (!hasKv(env)) return configurationError(env, request);
 
-  const verification = await verifyFordAuthorization(fordToken, fetchImpl, timeoutMs);
+  // Verified 2026-11-06: this Worker's direct egress to api.vehicle.ford.com
+  // fails at fetch level for the garage route (diagnostic:bootstrap-verify,
+  // stage 'fetch'), while the proxy lane reaches Ford reliably and already
+  // forwards the caller's bearer. Verify through the proxy so enrollment
+  // depends only on the lane the dashboard already trusts. The shared VIN
+  // limiter budgets this like any other dashboard read.
+  const garageBase = env.FORD_PROXY_BASE || 'https://proxy.cellblock.cc/api/data';
+  const verification = await verifyFordAuthorization(fordToken, fetchImpl, timeoutMs, `${garageBase}/garage`);
   if (verification.error === 'rejected') {
     return response(env, request, 401, { error: 'Ford authorization required' });
   }
