@@ -254,7 +254,7 @@ test('duplicate vehicle registrations: poll once and push via the token-holding 
   assert.equal(targetEnv.INSTALLATIONS.values.get(staleTokenKey), staleBefore, 'orphan token must not be invalidated');
 });
 
-async function apnsResponseScenario(status, reason) {
+async function apnsResponseScenario(status, reason, rotate = false) {
   const { targetEnv, installationID, token } = await enrolledEnvironment('home');
   await handleInstallationRequest(request('/api/live-activities/tokens', {
     method: 'PUT', token,
@@ -264,9 +264,20 @@ async function apnsResponseScenario(status, reason) {
   const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey));
   const pem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...pkcs8))}\n-----END PRIVATE KEY-----`;
   Object.assign(targetEnv, { APNS_PRIVATE_KEY_P8: pem });
+  let rotatedRecord;
   const fakeFetch = async (url) => {
     if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }), { status: 200 });
-    if (String(url).includes('push.apple.com')) return new Response(JSON.stringify({ reason }), { status });
+    if (String(url).includes('push.apple.com')) {
+      if (rotate) {
+        const response = await handleInstallationRequest(request('/api/live-activities/tokens', {
+          method: 'PUT', token,
+          body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'rotated-token', apnsEnvironment: 'sandbox' }
+        }), targetEnv);
+        assert.equal(response.status, 200);
+        rotatedRecord = [...targetEnv.INSTALLATIONS.values.entries()].find(([key]) => key.startsWith('live-activity-token:'))[1];
+      }
+      return new Response(JSON.stringify({ reason }), { status });
+    }
     if (String(url).includes('/telemetry')) return new Response(JSON.stringify({
       timestamp: '2026-09-21T02:00:00Z', metrics: {
         xevBatteryChargeDisplayStatus: { value: 'CHARGING' }, xevPlugChargerStatus: { value: 'CHARGING' },
@@ -278,7 +289,7 @@ async function apnsResponseScenario(status, reason) {
   await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 11_000_000 });
   const tokenKeys = [...targetEnv.INSTALLATIONS.values.keys()].filter(k => k.startsWith('live-activity-toke' + 'n:'));
   const auth = JSON.parse(targetEnv.INSTALLATIONS.values.get(`ford-authorization:${installationID}`));
-  return { targetEnv, tokenKeys, monitoringError: auth.monitoringError };
+  return { targetEnv, tokenKeys, rotatedRecord, monitoringError: auth.monitoringError };
 }
 
 test('APNs 400 keeps the push token and records the reason', async () => {
@@ -288,9 +299,11 @@ test('APNs 400 keeps the push token and records the reason', async () => {
   assert.equal(monitoringError.reason, 'BadMessage');
 });
 
-test('APNs 410 deletes the push token (genuinely unregistered)', async () => {
-  const { tokenKeys, monitoringError } = await apnsResponseScenario(410, 'Unregistered');
-  assert.equal(tokenKeys.length, 0, 'a 410 must delete the dead token');
+test('APNs 410 cannot delete a token rotated while the request was in flight', async () => {
+  const { targetEnv, tokenKeys, rotatedRecord, monitoringError } = await apnsResponseScenario(410, 'Unregistered', true);
+  assert.ok(rotatedRecord);
+  assert.equal(tokenKeys.length, 1, 'KV cannot safely delete the token after an asynchronous send');
+  assert.equal(targetEnv.INSTALLATIONS.values.get(tokenKeys[0]), rotatedRecord);
   assert.equal(monitoringError.code, 'apnsUnregistered');
   assert.equal(monitoringError.reason, 'Unregistered');
 });

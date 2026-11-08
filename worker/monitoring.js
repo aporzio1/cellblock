@@ -289,11 +289,11 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
     // favors delivery over uniqueness, especially for push-to-start.
     result = { outcome: 'retryable' };
   }
-  const tokenStorageKey = await tokenKey(installationID, record.opaqueVehicleIDHash, kind);
   if (result.outcome === 'sent') {
     await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp, monitoringError: null });
   } else if (result.outcome === 'invalidToken') {
-    await env.INSTALLATIONS.delete(tokenStorageKey);
+    // KV cannot compare-and-delete: a registration could have rotated the
+    // token after this send began. Preserve it rather than deleting the new one.
     await updateAuthorization(env, key, record, { monitoringError: { code: 'apnsUnregistered', updatedAt: now, status: result.status, reason: result.reason } });
   } else {
     await updateAuthorization(env, key, record, { monitoringError: { code: result.outcome, updatedAt: now, status: result.status, reason: result.reason } });
