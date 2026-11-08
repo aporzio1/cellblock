@@ -299,16 +299,22 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
 async function chooseDeliverable(env, group) {
   for (const candidate of group) {
     const installationID = candidate.key.slice('ford-authorization:'.length);
+    const record = candidate.record;
+    if (record?.status !== 'authorized' || !record.refreshTokenCiphertext || !record.vinCiphertext || !record.opaqueVehicleIDHash) continue;
     try {
-      const tokenRaw = await env.INSTALLATIONS.get(
-        await tokenKey(installationID, candidate.record.opaqueVehicleIDHash, 'pushToStart')
-      );
-      if (tokenRaw) return candidate;
+      const enrollment = JSON.parse(await env.INSTALLATIONS.get(enrollmentKey(installationID, record.opaqueVehicleIDHash)) || 'null');
+      const tokenRecord = JSON.parse(await env.INSTALLATIONS.get(
+        await tokenKey(installationID, record.opaqueVehicleIDHash, 'pushToStart')
+      ) || 'null');
+      if (!enrollment?.enrollmentID || !['production', 'sandbox'].includes(enrollment.apnsEnvironment) ||
+          !['both', 'fast', 'allAC', 'home'].includes(enrollment.chargingMode) ||
+          tokenRecord?.apnsEnvironment !== enrollment.apnsEnvironment || !tokenRecord.tokenCiphertext) continue;
+      if (await decryptValue(tokenRecord.tokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY)) return candidate;
     } catch {
-      // Treat an unreadable token as absent and keep looking.
+      // KV can be temporarily inconsistent; never delete or modify candidates.
     }
   }
-  return group[0];
+  return null;
 }
 
 export async function runScheduledMonitoring(env, options = {}) {
@@ -344,6 +350,7 @@ export async function runScheduledMonitoring(env, options = {}) {
 
   for (const group of byVehicle.values()) {
     const chosen = group.length === 1 ? group[0] : await chooseDeliverable(env, group);
+    if (!chosen) continue;
     try {
       await monitorAuthorization(env, chosen.key, chosen.record, fetchImpl, now);
     } catch {

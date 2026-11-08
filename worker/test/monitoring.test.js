@@ -223,6 +223,13 @@ test('duplicate vehicle registrations: poll once and push via the token-holding 
   targetEnv.INSTALLATIONS.values.set('ford-authorization-index',
     JSON.stringify([`ford-authorization:${staleID}`, realKey]));
 
+  // Clone the real token too, but deliberately omit the stale enrollment. This
+  // models a KV index containing a token-bearing orphan ahead of the real phone.
+  const existingTokenKey = [...targetEnv.INSTALLATIONS.values.keys()].find(k => k.startsWith('live-activity-token:'));
+  const staleTokenKey = existingTokenKey.replace(installationID, staleID);
+  targetEnv.INSTALLATIONS.values.set(staleTokenKey, targetEnv.INSTALLATIONS.values.get(existingTokenKey));
+  const staleBefore = targetEnv.INSTALLATIONS.values.get(staleTokenKey);
+
   const calls = [];
   const fakeFetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });
@@ -244,6 +251,7 @@ test('duplicate vehicle registrations: poll once and push via the token-holding 
   const apns = calls.find(c => c.url.includes('push.apple.com'));
   assert.ok(apns, 'push must be delivered to the token-holding registration');
   assert.equal(JSON.parse(apns.options.body).aps.event, 'start');
+  assert.equal(targetEnv.INSTALLATIONS.values.get(staleTokenKey), staleBefore, 'orphan token must not be invalidated');
 });
 
 async function apnsResponseScenario(status, reason) {
