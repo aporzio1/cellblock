@@ -179,7 +179,7 @@ export function apnsPayload(event, telemetry, state, now, attributesType) {
   return { aps };
 }
 
-async function sendAPNs(env, environment, token, event, telemetry, state, now, fetchImpl) {
+export async function sendAPNs(env, environment, token, event, telemetry, state, now, fetchImpl) {
   const jwt = await apnsJWT(env, now);
   if (!jwt || !token) return { outcome: 'apnsUnavailable' };
   const host = environment === 'production' ? 'api.push.apple.com' : 'api.sandbox.push.apple.com';

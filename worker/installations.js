@@ -16,7 +16,7 @@ const FORD_GARAGE_MAX_BODY_BYTES = 64 * 1024;
 // not hang the request, so the cancel is awaited only this long; the cancel
 // itself is still initiated deterministically.
 const FORD_GARAGE_CANCEL_TIMEOUT_MS = 1_000;
-import { encryptValue, validateVIN } from './monitoring.js';
+import { decryptValue, encryptValue, sendAPNs, validateVIN } from './monitoring.js';
 
 class BadRequest extends Error {}
 
@@ -594,6 +594,47 @@ async function authorize(env, request) {
   }
 }
 
+async function testLiveActivity(env, request, fetchImpl) {
+  if (!hasKv(env)) return configurationError(env, request);
+  const credential = await installationCredentialFromBearer(env, request);
+  if (credential.error) return credential.error;
+  try {
+    const body = await readJson(request);
+    const opaqueVehicleID = stringField(body, 'opaqueVehicleID', 512);
+    if (!['start', 'update', 'end'].includes(body.action)) throw new BadRequest('Invalid action');
+    const enrollment = await enrollmentRecord(env, credential.installationID, opaqueVehicleID);
+    if (!enrollment.record?.enrollmentID) return response(env, request, 409, { error: 'Not enrolled' });
+    const kind = body.action === 'start' ? 'pushToStart' : 'activity';
+    const key = `live-activity-token:${credential.installationID}:${enrollment.hash}:${await sha256(kind)}`;
+    const raw = await env.INSTALLATIONS.get(key);
+    if (!raw) return response(env, request, 409, { error: kind === 'activity' ? 'noActivityToken' : 'noPushToStartToken' });
+    let tokenRecord, token;
+    try {
+      tokenRecord = JSON.parse(raw);
+      token = await decryptValue(tokenRecord.tokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY);
+    } catch {
+      return response(env, request, 503, { error: 'Stored activity token unavailable' });
+    }
+    if (!['production', 'sandbox'].includes(tokenRecord.apnsEnvironment)) {
+      return response(env, request, 503, { error: 'Invalid APNs environment' });
+    }
+    const now = Date.now();
+    const telemetry = { charging: body.action !== 'end', powerKW: 7.4, socPercent: 42,
+      rangeKm: null, etaMinutes: 97, sourceTimestamp: new Date(now).toISOString() };
+    const state = { enrollmentID: enrollment.record.enrollmentID, units: enrollment.record.units, startedAt: now - 60000 };
+    const result = await sendAPNs(env, tokenRecord.apnsEnvironment, token, body.action, telemetry, state, now, fetchImpl);
+    if (result.outcome === 'sent') {
+      // Do not delete on successful end: a concurrent token registration can
+      // replace this KV key while APNs is in flight; KV has no compare-delete.
+      return response(env, request, 200, { action: body.action, results: [{ status: result.status, reason: null }] });
+    }
+    return response(env, request, 502, { error: result.outcome, ...(result.status ? { status: result.status } : {}) });
+  } catch (error) {
+    if (error instanceof BadRequest) return response(env, request, 400, { error: error.message });
+    throw error;
+  }
+}
+
 // options.fetchImpl is a test seam (same pattern as runScheduledMonitoring);
 // production callers omit it and the global fetch is used. options.fordTimeoutMs
 // is an optional upstream deadline override for the garage verification;
@@ -602,6 +643,7 @@ export async function handleInstallationRequest(request, env, options = {}) {
   const { pathname } = new URL(request.url);
   const installationRoute = pathname === '/api/installations/bootstrap';
   const enrollmentRoute = pathname === '/api/live-activities/enroll';
+  const testRoute = pathname === '/api/live-activities/test';
   const deleteEnrollmentRoute = pathname.startsWith('/api/live-activities/enroll/');
   const tokenRoute = pathname === '/api/live-activities/tokens';
   const preferencesRoute = pathname.startsWith('/api/live-activities/preferences/');
@@ -613,7 +655,7 @@ export async function handleInstallationRequest(request, env, options = {}) {
     pathname.startsWith('/api/ford/');
 
   if (!scopedRoute) return null;
-  if ((installationRoute || enrollmentRoute || authorizationRoute) && request.method !== 'POST') {
+  if ((installationRoute || enrollmentRoute || authorizationRoute || testRoute) && request.method !== 'POST') {
     return response(env, request, 404, { error: 'Not found' });
   }
   if (deleteEnrollmentRoute && request.method !== 'DELETE') return response(env, request, 404, { error: 'Not found' });
@@ -624,6 +666,7 @@ export async function handleInstallationRequest(request, env, options = {}) {
   try {
     if (installationRoute) return bootstrap(env, request, options.fetchImpl || fetch, options.fordTimeoutMs);
     if (enrollmentRoute) return enroll(env, request);
+    if (testRoute) return await testLiveActivity(env, request, options.fetchImpl || fetch);
     if (deleteEnrollmentRoute) return deleteEnrollment(env, request, pathname);
     if (tokenRoute) return registerToken(env, request);
     if (preferencesRoute) return updatePreferences(env, request, pathname);
