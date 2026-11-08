@@ -270,25 +270,33 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
       powerChanged);
   const event = started ? 'start' : ended ? 'end' : meaningfulUpdate ? 'update' : null;
   const nextState = { ...current, startedAt: started ? new Date(now).toISOString() : previous.startedAt };
-  if (!record.lastState || event) {
-    await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp });
+  if (!event) {
+    if (!record.lastState) await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp });
+    return;
   }
-  if (!event) return;
   const kind = event === 'start' ? 'pushToStart' : 'activity';
   const tokenRaw = await env.INSTALLATIONS.get(await tokenKey(installationID, record.opaqueVehicleIDHash, kind));
   let tokenRecord;
   try { tokenRecord = tokenRaw ? JSON.parse(tokenRaw) : null; } catch { tokenRecord = null; }
   let token;
   try { token = tokenRecord?.tokenCiphertext ? await decryptValue(tokenRecord.tokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY) : null; } catch { token = null; }
-  const result = await sendAPNs(env, enrollment.apnsEnvironment, token, event, { ...telemetry, charging }, { ...nextState, enrollmentID: enrollment.enrollmentID, units: enrollment.units }, now, fetchImpl);
+  if (tokenRecord?.apnsEnvironment !== enrollment.apnsEnvironment) token = null;
+  let result;
+  try {
+    result = await sendAPNs(env, enrollment.apnsEnvironment, token, event, { ...telemetry, charging }, { ...nextState, enrollmentID: enrollment.enrollmentID, units: enrollment.units }, now, fetchImpl);
+  } catch {
+    // A network failure may occur after APNs accepted the request. Retrying
+    // favors delivery over uniqueness, especially for push-to-start.
+    result = { outcome: 'retryable' };
+  }
   const tokenStorageKey = await tokenKey(installationID, record.opaqueVehicleIDHash, kind);
-  if (result.outcome === 'invalidToken') {
+  if (result.outcome === 'sent') {
+    await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp, monitoringError: null });
+  } else if (result.outcome === 'invalidToken') {
     await env.INSTALLATIONS.delete(tokenStorageKey);
-    await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: 'apnsUnregistered', updatedAt: now, status: result.status, reason: result.reason } });
-  } else if (result.outcome === 'apnsUnavailable' || result.outcome === 'retryable') {
-    // Record the real APNs status + reason so a delivery failure is diagnosable
-    // from KV alone. Token is kept — 400s are usually our request, not the token.
-    await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: result.outcome, updatedAt: now, status: result.status, reason: result.reason } });
+    await updateAuthorization(env, key, record, { monitoringError: { code: 'apnsUnregistered', updatedAt: now, status: result.status, reason: result.reason } });
+  } else {
+    await updateAuthorization(env, key, record, { monitoringError: { code: result.outcome, updatedAt: now, status: result.status, reason: result.reason } });
   }
 }
 
@@ -297,14 +305,17 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
 // Live Activity push. A stale re-registration shares the vehicle's rate budget
 // but can never deliver, so polling it first would silently drop the event.
 async function chooseDeliverable(env, group) {
-  for (const candidate of group) {
+  // Prefer an active registration with an activity token, so its end/update
+  // is not starved by a dormant registration's push-to-start token.
+  for (const kind of ['activity', 'pushToStart']) for (const candidate of group) {
     const installationID = candidate.key.slice('ford-authorization:'.length);
     const record = candidate.record;
+    if (kind === 'activity' && !record?.lastState?.charging) continue;
     if (record?.status !== 'authorized' || !record.refreshTokenCiphertext || !record.vinCiphertext || !record.opaqueVehicleIDHash) continue;
     try {
       const enrollment = JSON.parse(await env.INSTALLATIONS.get(enrollmentKey(installationID, record.opaqueVehicleIDHash)) || 'null');
       const tokenRecord = JSON.parse(await env.INSTALLATIONS.get(
-        await tokenKey(installationID, record.opaqueVehicleIDHash, 'pushToStart')
+        await tokenKey(installationID, record.opaqueVehicleIDHash, kind)
       ) || 'null');
       if (!enrollment?.enrollmentID || !['production', 'sandbox'].includes(enrollment.apnsEnvironment) ||
           !['both', 'fast', 'allAC', 'home'].includes(enrollment.chargingMode) ||

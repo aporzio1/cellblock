@@ -346,6 +346,63 @@ test('content-state carries the enrolled units preference to the widget', async 
   assert.equal(JSON.parse(apns.options.body).aps['content-state'].units, 'imperial');
 });
 
+test('failed end remains pending until APNs accepts it', async () => {
+  const { targetEnv, installationID, token } = await enrolledEnvironment('home');
+  await handleInstallationRequest(request('/api/live-activities/tokens', {
+    method: 'PUT', token, body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'activity', token: 'activity-token', apnsEnvironment: 'sandbox' }
+  }), targetEnv);
+  targetEnv.APNS_PRIVATE_KEY_P8 = await (await testPem(await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])))();
+  const key = `ford-authorization:${installationID}`;
+  const auth = JSON.parse(await targetEnv.INSTALLATIONS.get(key));
+  auth.lastState = { charging: true, startedAt: '2026-08-22T15:00:00Z' };
+  await targetEnv.INSTALLATIONS.put(key, JSON.stringify(auth));
+  let attempts = 0;
+  const fakeFetch = async url => {
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }));
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({ metrics: { xevPlugChargerStatus: { value: 'UNPLUGGED' } } }));
+    return new Response('{}', { status: ++attempts === 1 ? 503 : 200 });
+  };
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 1000000 });
+  assert.equal(JSON.parse(await targetEnv.INSTALLATIONS.get(key)).lastState.charging, true);
+  await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 1060000 });
+  assert.equal(JSON.parse(await targetEnv.INSTALLATIONS.get(key)).lastState.charging, false);
+  assert.equal(attempts, 2);
+});
+
+test('failed and ambiguous APNs starts retry without consuming the edge', async () => {
+  for (const failure of ['http', 'network', 'unavailable']) {
+    const { targetEnv, installationID, token } = await enrolledEnvironment('home');
+    if (failure !== 'unavailable') await handleInstallationRequest(request('/api/live-activities/tokens', {
+      method: 'PUT', token, body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+    }), targetEnv);
+    targetEnv.APNS_PRIVATE_KEY_P8 = await (await testPem(await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])))();
+    let attempts = 0;
+    const fakeFetch = async url => {
+      if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }));
+      if (String(url).includes('/telemetry')) return new Response(JSON.stringify({ metrics: {
+        xevBatteryChargeDisplayStatus: { value: 'CHARGING' },
+        xevBatteryChargerVoltageOutput: { value: 240 }, xevBatteryChargerCurrentOutput: { value: 30 }
+      } }));
+      attempts++;
+      if (attempts === 1 && failure === 'network') throw new Error('connection lost');
+      if (attempts === 1 && failure === 'http') return new Response('{}', { status: 503 });
+      return new Response('{}');
+    };
+    await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 1000000 });
+    let record = JSON.parse(await targetEnv.INSTALLATIONS.get(`ford-authorization:${installationID}`));
+    assert.notEqual(record.lastState?.charging, true, failure);
+    assert.ok(record.monitoringError, failure);
+    if (failure === 'unavailable') await handleInstallationRequest(request('/api/live-activities/tokens', {
+      method: 'PUT', token, body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+    }), targetEnv);
+    await runScheduledMonitoring(targetEnv, { fetchImpl: fakeFetch, now: 1060000 });
+    record = JSON.parse(await targetEnv.INSTALLATIONS.get(`ford-authorization:${installationID}`));
+    assert.equal(record.lastState.charging, true, failure);
+    assert.equal(record.monitoringError, null, failure);
+    assert.equal(attempts, failure === 'unavailable' ? 1 : 2, failure);
+  }
+});
+
 test('content-state units stays null for an enrollment made without units', async () => {
   const { targetEnv, token } = await enrolledEnvironment('home');
   await handleInstallationRequest(request('/api/live-activities/tokens', {
