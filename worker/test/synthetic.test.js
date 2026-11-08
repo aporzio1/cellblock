@@ -45,9 +45,9 @@ async function setup() {
     { opaqueVehicleID: 'vehicle', apnsEnvironment: 'sandbox', chargingMode: 'both', units: 'metric' }), env);
   return { env, token: bootstrap.token };
 }
-async function register(env, credential, kind, value) {
+async function register(env, credential, kind, value, vehicle = 'vehicle') {
   const r = await handleInstallationRequest(req('/api/live-activities/tokens', credential,
-    { opaqueVehicleID: 'vehicle', tokenKind: kind, token: value, apnsEnvironment: 'sandbox' }, 'PUT'), env);
+    { opaqueVehicleID: vehicle, tokenKind: kind, token: value, apnsEnvironment: 'sandbox' }, 'PUT'), env);
   assert.equal(r.status, 200);
 }
 const path = '/api/live-activities/test';
@@ -100,9 +100,45 @@ test('parallel replays reserve once, isolate actions and fail closed on limiter 
   assert.equal(calls, 1);
   assert.equal((await send('end')).status, 200);
   assert.equal(calls, 2);
+  // Expiry permits an intentional repeat without changing the app contract.
+  for (const bucket of env.FORD_RATE_LIMITER.buckets.values()) {
+    bucket.ctx.storage.kv.put('nextAllowedAt', Date.now() - 1);
+  }
+  assert.equal((await send('update')).status, 200);
+  assert.equal(calls, 3);
   env.FORD_RATE_LIMITER = null;
   assert.equal((await send('end')).status, 503);
+  assert.equal(calls, 3);
+});
+
+test('shared vehicle and token budgets stop concurrent multi-installation and identifier rotation', async () => {
+  const { env, token } = await setup();
+  const other = await (await handleInstallationRequest(req('/api/installations/bootstrap', 'another-ford-token', {}), env, { fetchImpl: garage })).json();
+  for (const vehicle of ['vehicle', 'other-vehicle']) {
+    assert.equal((await handleInstallationRequest(req('/api/live-activities/enroll', other.token,
+      { opaqueVehicleID: vehicle, apnsEnvironment: 'sandbox', chargingMode: 'both' }), env)).status, 200);
+  }
+  await register(env, token, 'activity', 'shared-token');
+  await register(env, other.token, 'activity', 'shared-token', 'other-vehicle');
+  await register(env, other.token, 'activity', 'different-token');
+  let calls = 0;
+  const fetchImpl = async () => { calls++; return new Response(null, { status: 200 }); };
+  const send = (credential, vehicle) => handleInstallationRequest(req(path, credential,
+    { opaqueVehicleID: vehicle, action: 'update' }), env, { fetchImpl });
+  const results = await Promise.all([send(token, 'vehicle'), send(other.token, 'vehicle')]);
+  assert.deepEqual(results.map(r => r.status).sort(), [200, 429]);
+  assert.equal(calls, 1);
+  // On a fresh budget, changing both installation and vehicle cannot evade
+  // the token bucket, and changing token cannot evade the vehicle bucket.
+  env.FORD_RATE_LIMITER = new Limiter();
+  assert.equal((await send(token, 'vehicle')).status, 200);
+  assert.equal((await send(other.token, 'other-vehicle')).status, 429);
+  assert.equal((await send(other.token, 'vehicle')).status, 429);
   assert.equal(calls, 2);
+  // Independent action budgets permit a normal update/end sequence.
+  const end = await handleInstallationRequest(req(path, other.token,
+    { opaqueVehicleID: 'vehicle', action: 'end' }), env, { fetchImpl });
+  assert.equal(end.status, 200);
 });
 
 test('APNs rejection and network failures are not reported as success or leak reason', async () => {

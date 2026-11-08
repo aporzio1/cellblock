@@ -618,15 +618,25 @@ async function testLiveActivity(env, request, fetchImpl) {
     if (!['production', 'sandbox'].includes(tokenRecord.apnsEnvironment)) {
       return response(env, request, 503, { error: 'Invalid APNs environment' });
     }
-    // One durable bucket per installation and action, independent of vehicle or
-    // token, prevents concurrent replays and cross-vehicle quota bypass. The
-    // existing SQLite-backed limiter reserves before APNs, even on failure.
+    // The app sends no request ID: identical deliberate tests and replays are
+    // indistinguishable. Bound duplicates instead of permanently rejecting them.
+    // Reserve both token and vehicle/action budgets across installations. The
+    // vehicle ID is client supplied, so the token budget is independently vital.
+    // Reservations are atomic per durable object, not across both objects; a
+    // denied second reservation can consume the first budget for 30 seconds.
     let limit;
     try {
       const namespace = env.FORD_RATE_LIMITER;
-      const id = namespace.idFromName(await sha256(`synthetic:${credential.installationID}:${body.action}`));
-      limit = await namespace.get(id).allow();
-      if (typeof limit?.allowed !== 'boolean' || !Number.isFinite(limit.retryAfterMs)) throw new Error('Invalid limiter response');
+      const identities = [
+        `synthetic:token:${await sha256(token)}:${body.action}`,
+        `synthetic:vehicle:${enrollment.hash}:${body.action}`
+      ];
+      for (const identity of identities) {
+        const id = namespace.idFromName(await sha256(identity));
+        limit = await namespace.get(id).allow();
+        if (typeof limit?.allowed !== 'boolean' || !Number.isFinite(limit.retryAfterMs)) throw new Error('Invalid limiter response');
+        if (!limit.allowed) break;
+      }
     } catch {
       return response(env, request, 503, { error: 'Synthetic test limiter unavailable' });
     }
