@@ -618,6 +618,25 @@ async function testLiveActivity(env, request, fetchImpl) {
     if (!['production', 'sandbox'].includes(tokenRecord.apnsEnvironment)) {
       return response(env, request, 503, { error: 'Invalid APNs environment' });
     }
+    // One durable bucket per installation and action, independent of vehicle or
+    // token, prevents concurrent replays and cross-vehicle quota bypass. The
+    // existing SQLite-backed limiter reserves before APNs, even on failure.
+    let limit;
+    try {
+      const namespace = env.FORD_RATE_LIMITER;
+      const id = namespace.idFromName(await sha256(`synthetic:${credential.installationID}:${body.action}`));
+      limit = await namespace.get(id).allow();
+      if (typeof limit?.allowed !== 'boolean' || !Number.isFinite(limit.retryAfterMs)) throw new Error('Invalid limiter response');
+    } catch {
+      return response(env, request, 503, { error: 'Synthetic test limiter unavailable' });
+    }
+    if (!limit.allowed) {
+      const retryAfter = Math.max(1, Math.ceil(limit.retryAfterMs / 1000));
+      const result = response(env, request, 429, { error: 'Synthetic test rate limit exceeded', retryAfter });
+      result.headers.set('Retry-After', String(retryAfter));
+      result.headers.set('Access-Control-Expose-Headers', 'Retry-After');
+      return result;
+    }
     const now = Date.now();
     const telemetry = { charging: body.action !== 'end', powerKW: 7.4, socPercent: 42,
       rangeKm: null, etaMinutes: 97, sourceTimestamp: new Date(now).toISOString() };
