@@ -376,16 +376,36 @@ export class MonitoringCoordinatorCore {
         } catch { /* isolate malformed registrations */ }
       }
       const active = await this.storage.get('activeOwner');
-      // If the index is temporarily stale, prefer a missed poll to a second
-      // start on another installation. Missing owner enrollment releases it.
+      // The index is eventually consistent and can omit a still-active owner.
+      // Read that owner directly before considering another registration.
       let chosen;
       if (active) {
         chosen = group.find(candidate => candidate.key === active.key);
-        if (!chosen) return { skipped: true };
-        const id = chosen.key.slice('ford-authorization:'.length);
+        if (!chosen) {
+          const raw = await this.env.INSTALLATIONS.get(active.key);
+          try {
+            const record = JSON.parse(raw || 'null');
+            if (record && group.some(candidate => candidate.record.opaqueVehicleIDHash === record.opaqueVehicleIDHash)) {
+              chosen = { key: active.key, record };
+            }
+          } catch { /* malformed; apply grace period */ }
+        }
+        const id = active.key.slice('ford-authorization:'.length);
+        const vehicleHash = chosen?.record.opaqueVehicleIDHash || group[0]?.record.opaqueVehicleIDHash;
         let enrollment;
-        try { enrollment = JSON.parse(await this.env.INSTALLATIONS.get(enrollmentKey(id, chosen.record.opaqueVehicleIDHash)) || 'null'); } catch { /* invalid */ }
-        if (enrollment?.enrollmentID !== active.enrollmentID) {
+        const enrollmentRaw = vehicleHash ? await this.env.INSTALLATIONS.get(enrollmentKey(id, vehicleHash)) : null;
+        try { enrollment = JSON.parse(enrollmentRaw || 'null'); } catch { /* malformed */ }
+        const available = chosen && chosen.record.status === 'authorized' && enrollment?.enrollmentID === active.enrollmentID;
+        if (available) {
+          if (active.unavailableSince != null) await this.storage.put('activeOwner', { key: active.key, enrollmentID: active.enrollmentID });
+        } else {
+          // Absence can be a stale KV read or an opt-out. Bound the risk of
+          // duplicate starts by requiring 15 minutes of observed unavailability.
+          if (active.unavailableSince == null || now < active.unavailableSince) {
+            await this.storage.put('activeOwner', { ...active, unavailableSince: now });
+            return { skipped: true };
+          }
+          if (now - active.unavailableSince < 900_000) return { skipped: true };
           await this.storage.put('activeOwner', null);
           chosen = null;
         }
