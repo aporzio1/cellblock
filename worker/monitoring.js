@@ -204,7 +204,7 @@ export async function sendAPNs(env, environment, token, event, telemetry, state,
   return { outcome: 'retryable', status: response.status, reason };
 }
 
-async function monitorAuthorization(env, key, record, fetchImpl, now) {
+async function monitorAuthorization(env, key, record, fetchImpl, now, durableStorage) {
   const installationID = key.slice('ford-authorization:'.length);
   const storeMonitoringError = async (code, status) => {
     const previous = record.monitoringError;
@@ -257,8 +257,13 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
   if (!enrollmentRaw) return;
   let enrollment;
   try { enrollment = JSON.parse(enrollmentRaw); } catch { return; }
+  if (typeof enrollment?.enrollmentID !== 'string' || !enrollment.enrollmentID ||
+      !['production', 'sandbox'].includes(enrollment.apnsEnvironment) ||
+      !['both', 'fast', 'allAC', 'home'].includes(enrollment.chargingMode)) return;
+  const durableKey = `${key}:${enrollment.enrollmentID}`;
+  const durable = durableStorage ? await durableStorage.get(durableKey) : null;
   const charging = modeAllowsCharging(enrollment.chargingMode, telemetry);
-  const previous = record.lastState || { charging: false };
+  const previous = durable?.lastState || record.lastState || { charging: false };
   const current = { charging, socPercent: telemetry.socPercent, powerKW: telemetry.powerKW, etaMinutes: telemetry.etaMinutes, sourceTimestamp: telemetry.sourceTimestamp, startedAt: previous.startedAt };
   const started = !previous.charging && charging;
   const ended = previous.charging && !charging;
@@ -270,25 +275,55 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
       powerChanged);
   const event = started ? 'start' : ended ? 'end' : meaningfulUpdate ? 'update' : null;
   const nextState = { ...current, startedAt: started ? new Date(now).toISOString() : previous.startedAt };
-  if (!record.lastState || event) {
-    await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp });
+  if (!event) {
+    if (durable?.pending) await durableStorage.put({ [durableKey]: { ...durable, pending: null },
+      activeOwner: previous.charging ? { key, enrollmentID: enrollment.enrollmentID } : null });
+    if (!record.lastState && !durable?.lastState) await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp });
+    return;
   }
-  if (!event) return;
   const kind = event === 'start' ? 'pushToStart' : 'activity';
   const tokenRaw = await env.INSTALLATIONS.get(await tokenKey(installationID, record.opaqueVehicleIDHash, kind));
   let tokenRecord;
   try { tokenRecord = tokenRaw ? JSON.parse(tokenRaw) : null; } catch { tokenRecord = null; }
   let token;
   try { token = tokenRecord?.tokenCiphertext ? await decryptValue(tokenRecord.tokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY) : null; } catch { token = null; }
-  const result = await sendAPNs(env, enrollment.apnsEnvironment, token, event, { ...telemetry, charging }, { ...nextState, enrollmentID: enrollment.enrollmentID, units: enrollment.units }, now, fetchImpl);
-  const tokenStorageKey = await tokenKey(installationID, record.opaqueVehicleIDHash, kind);
-  if (result.outcome === 'invalidToken') {
-    await env.INSTALLATIONS.delete(tokenStorageKey);
-    await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: 'apnsUnregistered', updatedAt: now, status: result.status, reason: result.reason } });
-  } else if (result.outcome === 'apnsUnavailable' || result.outcome === 'retryable') {
-    // Record the real APNs status + reason so a delivery failure is diagnosable
-    // from KV alone. Token is kept — 400s are usually our request, not the token.
-    await updateAuthorization(env, key, { ...record, lastState: nextState }, { monitoringError: { code: result.outcome, updatedAt: now, status: result.status, reason: result.reason } });
+  if (tokenRecord?.apnsEnvironment !== enrollment.apnsEnvironment) token = null;
+  // Count attempts before network I/O: a crash after APNs acceptance is ambiguous.
+  // Three attempts per 15-minute window bounds duplicate push-to-starts while
+  // allowing eventual recovery without permanently consuming a failed edge.
+  if (durableStorage && token && env.APNS_PRIVATE_KEY_P8) {
+    const old = durable?.pending;
+    const pending = old?.event === event && now - old.windowStart < 900_000
+      ? old : { event, windowStart: now, attempts: 0 };
+    if (pending.attempts >= 3) return;
+    await durableStorage.put({ [durableKey]: { ...durable, pending: { ...pending, attempts: pending.attempts + 1 } },
+      activeOwner: { key, enrollmentID: enrollment.enrollmentID } });
+  }
+  // Revalidate immediately before dispatch. KV remains eventually consistent,
+  // so this cannot make concurrent opt-outs linearizable.
+  if (await env.INSTALLATIONS.get(enrollmentKey(installationID, record.opaqueVehicleIDHash)) !== enrollmentRaw) return;
+  let result;
+  try {
+    result = await sendAPNs(env, enrollment.apnsEnvironment, token, event, { ...telemetry, charging }, { ...nextState, enrollmentID: enrollment.enrollmentID, units: enrollment.units }, now, fetchImpl);
+  } catch {
+    // A network failure may occur after APNs accepted the request. Retrying
+    // favors delivery over uniqueness, especially for push-to-start.
+    result = { outcome: 'retryable' };
+  }
+  if (result.outcome === 'sent') {
+    if (durableStorage) {
+      // Atomically commit the delivery and its owner; stale KV must not select
+      // a different registration and issue another start for the same vehicle.
+      await durableStorage.put({ [durableKey]: { lastState: nextState, pending: null },
+        activeOwner: charging ? { key, enrollmentID: enrollment.enrollmentID } : null });
+    }
+    await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp, monitoringError: null });
+  } else if (result.outcome === 'invalidToken') {
+    // KV cannot compare-and-delete: a registration could have rotated the
+    // token after this send began. Preserve it rather than deleting the new one.
+    await updateAuthorization(env, key, record, { monitoringError: { code: 'apnsUnregistered', updatedAt: now, status: result.status, reason: result.reason } });
+  } else {
+    await updateAuthorization(env, key, record, { monitoringError: { code: result.outcome, updatedAt: now, status: result.status, reason: result.reason } });
   }
 }
 
@@ -297,18 +332,91 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
 // Live Activity push. A stale re-registration shares the vehicle's rate budget
 // but can never deliver, so polling it first would silently drop the event.
 async function chooseDeliverable(env, group) {
-  for (const candidate of group) {
+  // Prefer an active registration with an activity token, so its end/update
+  // is not starved by a dormant registration's push-to-start token.
+  for (const kind of ['activity', 'pushToStart']) for (const candidate of group) {
     const installationID = candidate.key.slice('ford-authorization:'.length);
+    const record = candidate.record;
+    if (kind === 'activity' && !record?.lastState?.charging) continue;
+    if (record?.status !== 'authorized' || !record.refreshTokenCiphertext || !record.vinCiphertext || !record.opaqueVehicleIDHash) continue;
     try {
-      const tokenRaw = await env.INSTALLATIONS.get(
-        await tokenKey(installationID, candidate.record.opaqueVehicleIDHash, 'pushToStart')
-      );
-      if (tokenRaw) return candidate;
+      const enrollment = JSON.parse(await env.INSTALLATIONS.get(enrollmentKey(installationID, record.opaqueVehicleIDHash)) || 'null');
+      const tokenRecord = JSON.parse(await env.INSTALLATIONS.get(
+        await tokenKey(installationID, record.opaqueVehicleIDHash, kind)
+      ) || 'null');
+      if (!enrollment?.enrollmentID || !['production', 'sandbox'].includes(enrollment.apnsEnvironment) ||
+          !['both', 'fast', 'allAC', 'home'].includes(enrollment.chargingMode) ||
+          tokenRecord?.apnsEnvironment !== enrollment.apnsEnvironment || !tokenRecord.tokenCiphertext) continue;
+      if (await decryptValue(tokenRecord.tokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY)) return candidate;
     } catch {
-      // Treat an unreadable token as absent and keep looking.
+      // KV can be temporarily inconsistent; never delete or modify candidates.
     }
   }
-  return group[0];
+  return null;
+}
+
+// Set the guard before any await. Concurrent cron calls skip rather than queue.
+export class MonitoringCoordinatorCore {
+  constructor(storage, env, fetchImpl = fetch) {
+    this.storage = storage;
+    this.env = env;
+    this.fetchImpl = fetchImpl;
+    this.busy = false;
+  }
+
+  async run(keys, now = Date.now()) {
+    if (this.busy) return { skipped: true };
+    this.busy = true;
+    try {
+      const group = [];
+      for (const key of keys) {
+        try {
+          const record = JSON.parse(await this.env.INSTALLATIONS.get(key) || 'null');
+          if (record) group.push({ key, record });
+        } catch { /* isolate malformed registrations */ }
+      }
+      const active = await this.storage.get('activeOwner');
+      // The index is eventually consistent and can omit a still-active owner.
+      // Read that owner directly before considering another registration.
+      let chosen;
+      if (active) {
+        chosen = group.find(candidate => candidate.key === active.key);
+        if (!chosen) {
+          const raw = await this.env.INSTALLATIONS.get(active.key);
+          try {
+            const record = JSON.parse(raw || 'null');
+            if (record && group.some(candidate => candidate.record.opaqueVehicleIDHash === record.opaqueVehicleIDHash)) {
+              chosen = { key: active.key, record };
+            }
+          } catch { /* malformed; apply grace period */ }
+        }
+        const id = active.key.slice('ford-authorization:'.length);
+        const vehicleHash = chosen?.record.opaqueVehicleIDHash || group[0]?.record.opaqueVehicleIDHash;
+        let enrollment;
+        const enrollmentRaw = vehicleHash ? await this.env.INSTALLATIONS.get(enrollmentKey(id, vehicleHash)) : null;
+        try { enrollment = JSON.parse(enrollmentRaw || 'null'); } catch { /* malformed */ }
+        const available = chosen && chosen.record.status === 'authorized' && enrollment?.enrollmentID === active.enrollmentID;
+        if (available) {
+          if (active.unavailableSince != null) await this.storage.put('activeOwner', { key: active.key, enrollmentID: active.enrollmentID });
+        } else {
+          // Absence can be a stale KV read or an opt-out. Bound the risk of
+          // duplicate starts by requiring 15 minutes of observed unavailability.
+          if (active.unavailableSince == null || now < active.unavailableSince) {
+            await this.storage.put('activeOwner', { ...active, unavailableSince: now });
+            return { skipped: true };
+          }
+          if (now - active.unavailableSince < 900_000) return { skipped: true };
+          await this.storage.put('activeOwner', null);
+          chosen = null;
+        }
+      }
+      if (!chosen) chosen = group.length === 1 ? group[0] : await chooseDeliverable(this.env, group);
+      if (chosen) await monitorAuthorization(this.env, chosen.key, chosen.record, this.fetchImpl, now, this.storage);
+      return { skipped: false };
+    } finally {
+      this.busy = false;
+    }
+  }
 }
 
 export async function runScheduledMonitoring(env, options = {}) {
@@ -342,10 +450,16 @@ export async function runScheduledMonitoring(env, options = {}) {
     }
   }
 
-  for (const group of byVehicle.values()) {
-    const chosen = group.length === 1 ? group[0] : await chooseDeliverable(env, group);
+  for (const [vehicleHash, group] of byVehicle) {
     try {
-      await monitorAuthorization(env, chosen.key, chosen.record, fetchImpl, now);
+      if (env.MONITORING_COORDINATOR) {
+        const stub = env.MONITORING_COORDINATOR.get(env.MONITORING_COORDINATOR.idFromName(vehicleHash));
+        await stub.run(group.map(candidate => candidate.key), now);
+      } else if (options.fetchImpl) {
+        // Legacy unit-test injection only; production fails closed without the binding.
+        const chosen = group.length === 1 ? group[0] : await chooseDeliverable(env, group);
+        if (chosen) await monitorAuthorization(env, chosen.key, chosen.record, fetchImpl, now);
+      }
     } catch {
       // A failure for one vehicle must not stop the others.
     }

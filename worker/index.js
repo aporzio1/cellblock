@@ -1,6 +1,14 @@
 import { DurableObject } from 'cloudflare:workers';
 import { handleInstallationRequest, verifyFordAuthorization } from './installations.js';
-import { runScheduledMonitoring } from './monitoring.js';
+import { runScheduledMonitoring, MonitoringCoordinatorCore } from './monitoring.js';
+
+export class MonitoringCoordinator extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.coordinator = new MonitoringCoordinatorCore(ctx.storage, env);
+  }
+  async run(keys, now) { return this.coordinator.run(keys, now); }
+}
 
 // Lightning Rod token/data proxy — Cloudflare Worker port of server/index.js.
 //
