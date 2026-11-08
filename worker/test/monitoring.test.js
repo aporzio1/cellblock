@@ -4,13 +4,16 @@ import { webcrypto } from 'node:crypto';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
-import { runScheduledMonitoring } from '../monitoring.js';
+import { runScheduledMonitoring, MonitoringCoordinatorCore } from '../monitoring.js';
 import { handleInstallationRequest } from '../installations.js';
 
 class MemoryKV {
   constructor(values = {}) { this.values = new Map(Object.entries(values)); }
   async get(key) { return this.values.get(key) ?? null; }
-  async put(key, value) { this.values.set(key, value); }
+  async put(key, value) {
+    if (typeof key === 'object') for (const [k, v] of Object.entries(key)) this.values.set(k, v);
+    else this.values.set(key, value);
+  }
   async delete(key) { this.values.delete(key); }
   async list({ prefix = '', limit = 1000, cursor } = {}) {
     const keys = [...this.values.keys()].filter(key => key.startsWith(prefix)).sort();
@@ -442,4 +445,84 @@ test('content-state units stays null for an enrollment made without units', asyn
   const apns = calls.find(call => call.url.includes('push.apple.com'));
   assert.ok(apns, 'expected one APNs push');
   assert.equal(JSON.parse(apns.options.body).aps['content-state'].units, null);
+});
+
+test('coordinator serializes overlapping cron, survives restart and bounds ambiguous retries', async () => {
+  const { targetEnv, installationID, token } = await enrolledEnvironment('home');
+  await handleInstallationRequest(request('/api/live-activities/tokens', {
+    method: 'PUT', token, body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+  }), targetEnv);
+  targetEnv.APNS_PRIVATE_KEY_P8 = await (await testPem(await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])))();
+  const key = `ford-authorization:${installationID}`;
+  let attempts = 0, release, entered;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const reached = new Promise(resolve => { entered = resolve; });
+  const fakeFetch = async url => {
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }));
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({ metrics: {
+      xevBatteryChargeDisplayStatus: { value: 'CHARGING' },
+      xevBatteryChargerVoltageOutput: { value: 240 }, xevBatteryChargerCurrentOutput: { value: 30 }
+    } }));
+    attempts++;
+    if (attempts === 1) { entered(); await blocked; }
+    throw new Error('ambiguous APNs failure');
+  };
+  const storage = new MemoryKV();
+  let coordinator = new MonitoringCoordinatorCore(storage, targetEnv, fakeFetch);
+  const first = coordinator.run([key], 1_000_000);
+  await reached;
+  assert.deepEqual(await coordinator.run([key], 1_000_000), { skipped: true });
+  release();
+  await first;
+  assert.notEqual(JSON.parse(await targetEnv.INSTALLATIONS.get(key)).lastState?.charging, true);
+  coordinator = new MonitoringCoordinatorCore(storage, targetEnv, fakeFetch);
+  await coordinator.run([key], 1_060_000);
+  await coordinator.run([key], 1_120_000);
+  await coordinator.run([key], 1_180_000);
+  assert.equal(attempts, 3);
+  await coordinator.run([key], 1_900_000);
+  assert.equal(attempts, 4);
+});
+
+test('single invalid enrollment never dispatches APNs', async () => {
+  const { targetEnv, installationID, token } = await enrolledEnvironment('home');
+  await handleInstallationRequest(request('/api/live-activities/tokens', {
+    method: 'PUT', token, body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+  }), targetEnv);
+  const enrollmentKey = [...targetEnv.INSTALLATIONS.values.keys()].find(k => k.startsWith('live-activity:'));
+  const enrollment = JSON.parse(await targetEnv.INSTALLATIONS.get(enrollmentKey));
+  enrollment.chargingMode = 'bogus';
+  await targetEnv.INSTALLATIONS.put(enrollmentKey, JSON.stringify(enrollment));
+  let apns = 0;
+  const fakeFetch = async url => {
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }));
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({ metrics: { xevBatteryChargeDisplayStatus: { value: 'CHARGING' } } }));
+    apns++; return new Response('{}');
+  };
+  await new MonitoringCoordinatorCore(new MemoryKV(), targetEnv, fakeFetch).run([`ford-authorization:${installationID}`]);
+  assert.equal(apns, 0);
+});
+
+test('successful start remains deduplicated after coordinator restart with stale KV', async () => {
+  const { targetEnv, installationID, token } = await enrolledEnvironment('home');
+  await handleInstallationRequest(request('/api/live-activities/tokens', {
+    method: 'PUT', token, body: { opaqueVehicleID: 'opaque-vehicle', tokenKind: 'pushToStart', token: 'push-token', apnsEnvironment: 'sandbox' }
+  }), targetEnv);
+  targetEnv.APNS_PRIVATE_KEY_P8 = await (await testPem(await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])))();
+  const key = `ford-authorization:${installationID}`;
+  const oldAuth = await targetEnv.INSTALLATIONS.get(key);
+  let sends = 0;
+  const fakeFetch = async url => {
+    if (String(url).includes('/oauth2/')) return new Response(JSON.stringify({ access_token: 'access' }));
+    if (String(url).includes('/telemetry')) return new Response(JSON.stringify({ metrics: {
+      xevBatteryChargeDisplayStatus: { value: 'CHARGING' },
+      xevBatteryChargerVoltageOutput: { value: 240 }, xevBatteryChargerCurrentOutput: { value: 30 }
+    } }));
+    sends++; return new Response('{}');
+  };
+  const storage = new MemoryKV();
+  await new MonitoringCoordinatorCore(storage, targetEnv, fakeFetch).run([key], 1_000_000);
+  await targetEnv.INSTALLATIONS.put(key, oldAuth);
+  await new MonitoringCoordinatorCore(storage, targetEnv, fakeFetch).run([key], 1_060_000);
+  assert.equal(sends, 1);
 });

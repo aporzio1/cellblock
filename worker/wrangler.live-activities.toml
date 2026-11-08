@@ -2,7 +2,7 @@ name = "cellblock-live-activities"
 main = "index.js"
 compatibility_date = "2026-08-21"
 
-exports = { FordRateLimiter = { type = "durable-object", storage = "sqlite" } }
+exports = { FordRateLimiter = { type = "durable-object", storage = "sqlite" }, MonitoringCoordinator = { type = "durable-object", storage = "sqlite" } }
 
 [triggers]
 crons = ["* * * * *"]
@@ -10,6 +10,10 @@ crons = ["* * * * *"]
 [[durable_objects.bindings]]
 name = "FORD_RATE_LIMITER"
 class_name = "FordRateLimiter"
+
+[[durable_objects.bindings]]
+name = "MONITORING_COORDINATOR"
+class_name = "MonitoringCoordinator"
 
 [[kv_namespaces]]
 binding = "INSTALLATIONS"

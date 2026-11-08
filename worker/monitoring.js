@@ -204,7 +204,7 @@ export async function sendAPNs(env, environment, token, event, telemetry, state,
   return { outcome: 'retryable', status: response.status, reason };
 }
 
-async function monitorAuthorization(env, key, record, fetchImpl, now) {
+async function monitorAuthorization(env, key, record, fetchImpl, now, durableStorage) {
   const installationID = key.slice('ford-authorization:'.length);
   const storeMonitoringError = async (code, status) => {
     const previous = record.monitoringError;
@@ -257,8 +257,13 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
   if (!enrollmentRaw) return;
   let enrollment;
   try { enrollment = JSON.parse(enrollmentRaw); } catch { return; }
+  if (typeof enrollment?.enrollmentID !== 'string' || !enrollment.enrollmentID ||
+      !['production', 'sandbox'].includes(enrollment.apnsEnvironment) ||
+      !['both', 'fast', 'allAC', 'home'].includes(enrollment.chargingMode)) return;
+  const durableKey = `${key}:${enrollment.enrollmentID}`;
+  const durable = durableStorage ? await durableStorage.get(durableKey) : null;
   const charging = modeAllowsCharging(enrollment.chargingMode, telemetry);
-  const previous = record.lastState || { charging: false };
+  const previous = durable?.lastState || record.lastState || { charging: false };
   const current = { charging, socPercent: telemetry.socPercent, powerKW: telemetry.powerKW, etaMinutes: telemetry.etaMinutes, sourceTimestamp: telemetry.sourceTimestamp, startedAt: previous.startedAt };
   const started = !previous.charging && charging;
   const ended = previous.charging && !charging;
@@ -271,7 +276,9 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
   const event = started ? 'start' : ended ? 'end' : meaningfulUpdate ? 'update' : null;
   const nextState = { ...current, startedAt: started ? new Date(now).toISOString() : previous.startedAt };
   if (!event) {
-    if (!record.lastState) await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp });
+    if (durable?.pending) await durableStorage.put({ [durableKey]: { ...durable, pending: null },
+      activeOwner: previous.charging ? { key, enrollmentID: enrollment.enrollmentID } : null });
+    if (!record.lastState && !durable?.lastState) await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp });
     return;
   }
   const kind = event === 'start' ? 'pushToStart' : 'activity';
@@ -281,6 +288,20 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
   let token;
   try { token = tokenRecord?.tokenCiphertext ? await decryptValue(tokenRecord.tokenCiphertext, env.INSTALLATION_ENCRYPTION_KEY) : null; } catch { token = null; }
   if (tokenRecord?.apnsEnvironment !== enrollment.apnsEnvironment) token = null;
+  // Count attempts before network I/O: a crash after APNs acceptance is ambiguous.
+  // Three attempts per 15-minute window bounds duplicate push-to-starts while
+  // allowing eventual recovery without permanently consuming a failed edge.
+  if (durableStorage && token && env.APNS_PRIVATE_KEY_P8) {
+    const old = durable?.pending;
+    const pending = old?.event === event && now - old.windowStart < 900_000
+      ? old : { event, windowStart: now, attempts: 0 };
+    if (pending.attempts >= 3) return;
+    await durableStorage.put({ [durableKey]: { ...durable, pending: { ...pending, attempts: pending.attempts + 1 } },
+      activeOwner: { key, enrollmentID: enrollment.enrollmentID } });
+  }
+  // Revalidate immediately before dispatch. KV remains eventually consistent,
+  // so this cannot make concurrent opt-outs linearizable.
+  if (await env.INSTALLATIONS.get(enrollmentKey(installationID, record.opaqueVehicleIDHash)) !== enrollmentRaw) return;
   let result;
   try {
     result = await sendAPNs(env, enrollment.apnsEnvironment, token, event, { ...telemetry, charging }, { ...nextState, enrollmentID: enrollment.enrollmentID, units: enrollment.units }, now, fetchImpl);
@@ -290,6 +311,12 @@ async function monitorAuthorization(env, key, record, fetchImpl, now) {
     result = { outcome: 'retryable' };
   }
   if (result.outcome === 'sent') {
+    if (durableStorage) {
+      // Atomically commit the delivery and its owner; stale KV must not select
+      // a different registration and issue another start for the same vehicle.
+      await durableStorage.put({ [durableKey]: { lastState: nextState, pending: null },
+        activeOwner: charging ? { key, enrollmentID: enrollment.enrollmentID } : null });
+    }
     await updateAuthorization(env, key, record, { lastState: nextState, lastSourceTimestamp: telemetry.sourceTimestamp, monitoringError: null });
   } else if (result.outcome === 'invalidToken') {
     // KV cannot compare-and-delete: a registration could have rotated the
@@ -328,6 +355,50 @@ async function chooseDeliverable(env, group) {
   return null;
 }
 
+// Set the guard before any await. Concurrent cron calls skip rather than queue.
+export class MonitoringCoordinatorCore {
+  constructor(storage, env, fetchImpl = fetch) {
+    this.storage = storage;
+    this.env = env;
+    this.fetchImpl = fetchImpl;
+    this.busy = false;
+  }
+
+  async run(keys, now = Date.now()) {
+    if (this.busy) return { skipped: true };
+    this.busy = true;
+    try {
+      const group = [];
+      for (const key of keys) {
+        try {
+          const record = JSON.parse(await this.env.INSTALLATIONS.get(key) || 'null');
+          if (record) group.push({ key, record });
+        } catch { /* isolate malformed registrations */ }
+      }
+      const active = await this.storage.get('activeOwner');
+      // If the index is temporarily stale, prefer a missed poll to a second
+      // start on another installation. Missing owner enrollment releases it.
+      let chosen;
+      if (active) {
+        chosen = group.find(candidate => candidate.key === active.key);
+        if (!chosen) return { skipped: true };
+        const id = chosen.key.slice('ford-authorization:'.length);
+        let enrollment;
+        try { enrollment = JSON.parse(await this.env.INSTALLATIONS.get(enrollmentKey(id, chosen.record.opaqueVehicleIDHash)) || 'null'); } catch { /* invalid */ }
+        if (enrollment?.enrollmentID !== active.enrollmentID) {
+          await this.storage.put('activeOwner', null);
+          chosen = null;
+        }
+      }
+      if (!chosen) chosen = group.length === 1 ? group[0] : await chooseDeliverable(this.env, group);
+      if (chosen) await monitorAuthorization(this.env, chosen.key, chosen.record, this.fetchImpl, now, this.storage);
+      return { skipped: false };
+    } finally {
+      this.busy = false;
+    }
+  }
+}
+
 export async function runScheduledMonitoring(env, options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const now = options.now || Date.now();
@@ -359,11 +430,16 @@ export async function runScheduledMonitoring(env, options = {}) {
     }
   }
 
-  for (const group of byVehicle.values()) {
-    const chosen = group.length === 1 ? group[0] : await chooseDeliverable(env, group);
-    if (!chosen) continue;
+  for (const [vehicleHash, group] of byVehicle) {
     try {
-      await monitorAuthorization(env, chosen.key, chosen.record, fetchImpl, now);
+      if (env.MONITORING_COORDINATOR) {
+        const stub = env.MONITORING_COORDINATOR.get(env.MONITORING_COORDINATOR.idFromName(vehicleHash));
+        await stub.run(group.map(candidate => candidate.key), now);
+      } else if (options.fetchImpl) {
+        // Legacy unit-test injection only; production fails closed without the binding.
+        const chosen = group.length === 1 ? group[0] : await chooseDeliverable(env, group);
+        if (chosen) await monitorAuthorization(env, chosen.key, chosen.record, fetchImpl, now);
+      }
     } catch {
       // A failure for one vehicle must not stop the others.
     }
