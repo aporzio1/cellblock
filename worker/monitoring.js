@@ -86,6 +86,9 @@ export function decodeTelemetry(body) {
     socPercent: numberValue(metricValue(metrics, 'xevBatteryStateOfCharge')),
     rangeKm: numberValue(metricValue(metrics, 'xevBatteryRange')),
     etaMinutes: numberValue(metricValue(metrics, 'xevBatteryTimeToFullCharge')),
+    // Only the ETA metric's own updateTime can anchor its duration.
+    etaObservedAt: Number.isSafeInteger(metrics?.xevBatteryTimeToFullCharge?.value) && metrics.xevBatteryTimeToFullCharge.value >= 0
+      ? metrics.xevBatteryTimeToFullCharge.updateTime : null,
     sourceTimestamp: typeof sourceTimestamp === 'string' ? sourceTimestamp : new Date(sourceTimestamp).toISOString()
   };
 }
@@ -155,12 +158,21 @@ function contentState(telemetry, state, now, units) {
     if (!Number.isFinite(milliseconds)) return (now - 978307200000) / 1000;
     return (milliseconds > 10_000_000_000 ? milliseconds / 1000 : milliseconds) - 978307200;
   };
+  // Match the iOS source-freshness window; never replace missing or stale
+  // metric times with the envelope timestamp or the current clock.
+  const rawEtaTime = telemetry.etaObservedAt;
+  const etaTime = typeof rawEtaTime === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(rawEtaTime)
+    ? Date.parse(rawEtaTime) : NaN;
+  const etaAge = now - etaTime;
+  const etaAnchor = telemetry.charging && Number.isFinite(telemetry.etaMinutes) && telemetry.etaMinutes >= 0 &&
+    Number.isFinite(etaTime) && etaAge >= 0 && etaAge <= 300_000 ? swiftDate(etaTime) : null;
   return {
     phase: telemetry.charging ? 'active' : 'completed',
     powerKW: telemetry.charging ? telemetry.powerKW : null,
     socPercent: telemetry.socPercent,
     rangeKm: telemetry.rangeKm,
     timeToFullMinutes: telemetry.etaMinutes === null ? null : Math.round(telemetry.etaMinutes),
+    timeToFullObservedAt: etaAnchor,
     startedAt: swiftDate(state.startedAt || now),
     lastSourceUpdatedAt: swiftDate(telemetry.sourceTimestamp),
     isStale: false,
