@@ -11,6 +11,22 @@ const key = id => `ford-authorization:${id}`;
 const enrollmentKey = id => `live-activity:${id}:vehicle`;
 const tokenKey = id => `live-activity-token:${id}:vehicle:${hash('pushToStart')}`;
 
+test('real workerd SQLite limiter serializes simultaneous reservations', async t => {
+  const mf = new Miniflare({
+    modules: true, modulesRoot: '.', modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }],
+    scriptPath: 'test/runtime-harness.js', compatibilityDate: '2025-04-01',
+    durableObjects: { LIMITER: { className: 'FordRateLimiter', useSQLite: true } }
+  });
+  t.after(() => mf.dispose());
+  const ns = await mf.getDurableObjectNamespace('LIMITER');
+  const stub = ns.get(ns.idFromName('synthetic:token:example:start'));
+  const results = await Promise.all(Array.from({ length: 20 }, () => stub.allow()));
+  assert.equal(results.filter(result => result.allowed).length, 1);
+  assert.ok(results.filter(result => !result.allowed).every(result => result.retryAfterMs > 0));
+  const separate = ns.get(ns.idFromName('synthetic:token:example:end'));
+  assert.equal((await separate.allow()).allowed, true);
+});
+
 test('real workerd coordinator: stale index, opt-out, concurrency and retry', async t => {
   let sends = 0, failures = 0, gate, entered;
   const mf = new Miniflare({

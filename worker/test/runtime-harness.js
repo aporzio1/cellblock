@@ -1,4 +1,5 @@
 import { MonitoringCoordinator } from '../index.js';
+export { FordRateLimiter } from '../index.js';
 
 // Test-only entry point: the coordinator and its run() are production code.
 export class TestCoordinator extends MonitoringCoordinator {
