@@ -161,8 +161,13 @@ function contentState(telemetry, state, now, units) {
   // Match the iOS source-freshness window; never replace missing or stale
   // metric times with the envelope timestamp or the current clock.
   const rawEtaTime = telemetry.etaObservedAt;
-  const etaTime = typeof rawEtaTime === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(rawEtaTime)
-    ? Date.parse(rawEtaTime) : NaN;
+  const parts = typeof rawEtaTime === 'string' && /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(rawEtaTime);
+  // Date.parse normalizes impossible dates (e.g. February 31); reject them.
+  const calendarDate = parts ? new Date(`${parts[1]}-${parts[2]}-${parts[3]}T00:00:00Z`) : null;
+  const validCalendarDate = calendarDate && Number.isFinite(calendarDate.getTime()) &&
+    calendarDate.toISOString().slice(0, 10) === `${parts[1]}-${parts[2]}-${parts[3]}` &&
+    Number(parts[4]) <= 23 && Number(parts[5]) <= 59 && Number(parts[6]) <= 59;
+  const etaTime = validCalendarDate ? Date.parse(rawEtaTime) : NaN;
   const etaAge = now - etaTime;
   const etaAnchor = telemetry.charging && Number.isFinite(telemetry.etaMinutes) && telemetry.etaMinutes >= 0 &&
     Number.isFinite(etaTime) && etaAge >= 0 && etaAge <= 300_000 ? swiftDate(etaTime) : null;

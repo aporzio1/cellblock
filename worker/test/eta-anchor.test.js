@@ -30,3 +30,16 @@ test('missing, invalid, future, or stale metric timestamp never borrows envelope
   ]) assert.equal(state(metric).timeToFullObservedAt, null);
   assert.notEqual(state({ value: 90, updateTime: '2026-08-04T11:57:00Z' }).timeToFullObservedAt, null);
 });
+
+test('impossible calendar dates and normalized 24:00 are not anchors', () => {
+  for (const [nowText, invalid] of [
+    ['2026-03-03T00:00:00Z', '2026-02-31T00:00:00Z'],
+    ['2026-08-05T00:00:00Z', '2026-08-04T24:00:00Z']
+  ]) {
+    const telemetry = decodeTelemetry({ metrics: {
+      xevBatteryChargeDisplayStatus: { value: 'CHARGING' },
+      xevBatteryTimeToFullCharge: { value: 90, updateTime: invalid }
+    }});
+    assert.equal(apnsPayload('update', telemetry, {}, Date.parse(nowText)).aps['content-state'].timeToFullObservedAt, null);
+  }
+});
