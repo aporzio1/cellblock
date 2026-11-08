@@ -27,6 +27,37 @@ test('real workerd SQLite limiter serializes simultaneous reservations', async t
   assert.equal((await separate.allow()).allowed, true);
 });
 
+test('real workerd route limits rotating vehicle and token on one installation', async t => {
+  let sends = 0;
+  const mf = new Miniflare({
+    modules: true, modulesRoot: '.', modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }],
+    scriptPath: 'test/runtime-harness.js', compatibilityDate: '2025-04-01',
+    durableObjects: { FORD_RATE_LIMITER: { className: 'FordRateLimiter', useSQLite: true } },
+    kvNamespaces: ['INSTALLATIONS'],
+    bindings: { INSTALLATION_ENCRYPTION_KEY: encryptionKey, APNS_PRIVATE_KEY_P8: pem, APNS_TEAM_ID: 'team', APNS_KEY_ID: 'key', APNS_TOPIC: 'app' },
+    outboundService: async request => {
+      if (request.url.includes('push.apple.com')) { sends++; return new Response(null, { status: 200 }); }
+      return Response.json({});
+    }
+  });
+  t.after(() => mf.dispose());
+  const call = (path, bearer, body, method = 'POST') => mf.dispatchFetch('https://example.test' + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bearer}` }, body: JSON.stringify(body)
+  });
+  const boot = await call('/api/installations/bootstrap', 'ford', {});
+  assert.equal(boot.status, 200);
+  const { token } = await boot.json();
+  for (const vehicle of ['vehicle-a', 'vehicle-b']) {
+    assert.equal((await call('/api/live-activities/enroll', token, { opaqueVehicleID: vehicle, apnsEnvironment: 'sandbox', chargingMode: 'both' })).status, 200);
+    assert.equal((await call('/api/live-activities/tokens', token, { opaqueVehicleID: vehicle, apnsEnvironment: 'sandbox', tokenKind: 'activity', token: vehicle + '-token' }, 'PUT')).status, 200);
+  }
+  const responses = await Promise.all(['vehicle-a', 'vehicle-b'].map(opaqueVehicleID => call('/api/live-activities/test', token, { opaqueVehicleID, action: 'update' })));
+  assert.deepEqual(responses.map(r => r.status).sort(), [200, 429]);
+  assert.equal(sends, 1);
+  assert.equal((await call('/api/live-activities/test', token, { opaqueVehicleID: 'vehicle-b', action: 'end' })).status, 200);
+  assert.equal(sends, 2);
+});
+
 test('real workerd coordinator: stale index, opt-out, concurrency and retry', async t => {
   let sends = 0, failures = 0, gate, entered;
   const mf = new Miniflare({

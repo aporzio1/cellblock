@@ -620,14 +620,15 @@ async function testLiveActivity(env, request, fetchImpl) {
     }
     // The app sends no request ID: identical deliberate tests and replays are
     // indistinguishable. Bound duplicates instead of permanently rejecting them.
-    // Reserve both token and vehicle/action budgets across installations. The
-    // vehicle ID is client supplied, so the token budget is independently vital.
-    // Reservations are atomic per durable object, not across both objects; a
-    // denied second reservation can consume the first budget for 30 seconds.
+    // Bound each installation as well as token and vehicle across installations;
+    // both vehicle IDs and APNs tokens are caller-controlled and can rotate.
+    // Reservations are atomic per object, not across objects; a later denial
+    // can consume earlier budgets for 30 seconds.
     let limit;
     try {
       const namespace = env.FORD_RATE_LIMITER;
       const identities = [
+        `synthetic:installation:${credential.installationID}:${body.action}`,
         `synthetic:token:${await sha256(token)}:${body.action}`,
         `synthetic:vehicle:${enrollment.hash}:${body.action}`
       ];

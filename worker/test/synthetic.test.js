@@ -141,6 +141,23 @@ test('shared vehicle and token budgets stop concurrent multi-installation and id
   assert.equal(end.status, 200);
 });
 
+test('one installation cannot evade its budget by rotating both vehicle and token', async () => {
+  const { env, token } = await setup();
+  assert.equal((await handleInstallationRequest(req('/api/live-activities/enroll', token,
+    { opaqueVehicleID: 'rotated', apnsEnvironment: 'sandbox', chargingMode: 'both' }), env)).status, 200);
+  await register(env, token, 'activity', 'first-token');
+  await register(env, token, 'activity', 'second-token', 'rotated');
+  let calls = 0;
+  const fetchImpl = async () => { calls++; return new Response(null, { status: 200 }); };
+  const send = (vehicle, action) => handleInstallationRequest(req(path, token,
+    { opaqueVehicleID: vehicle, action }), env, { fetchImpl });
+  const results = await Promise.all([send('vehicle', 'update'), send('rotated', 'update')]);
+  assert.deepEqual(results.map(r => r.status).sort(), [200, 429]);
+  assert.equal(calls, 1);
+  assert.equal((await send('rotated', 'end')).status, 200);
+  assert.equal(calls, 2);
+});
+
 test('APNs rejection and network failures are not reported as success or leak reason', async () => {
   const { env, token } = await setup(); await register(env, token, 'activity', 'activity-token');
   const before = new Map(env.INSTALLATIONS.values);
