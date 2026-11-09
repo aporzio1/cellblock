@@ -179,6 +179,13 @@ export function apnsPayload(event, telemetry, state, now, attributesType) {
   return { aps };
 }
 
+// Temporary, bounded probe; never include identifiers, secrets or telemetry.
+// Expires 2026-11-09 18:10 UTC.
+const DIAGNOSTIC_UNTIL = 1794247826000;
+function chargingDiagnostic(now, data) {
+  if (now < DIAGNOSTIC_UNTIL) console.log('charging-diagnostic', JSON.stringify(data));
+}
+
 export async function sendAPNs(env, environment, token, event, telemetry, state, now, fetchImpl) {
   const jwt = await apnsJWT(env, now);
   if (!jwt || !token) return { outcome: 'apnsUnavailable' };
@@ -274,6 +281,10 @@ async function monitorAuthorization(env, key, record, fetchImpl, now, durableSto
       (telemetry.etaMinutes !== null && telemetry.etaMinutes !== previous.etaMinutes) ||
       powerChanged);
   const event = started ? 'start' : ended ? 'end' : meaningfulUpdate ? 'update' : null;
+  chargingDiagnostic(now, { stage: 'state', durableState: !!durable?.lastState,
+    previousCharging: !!previous.charging, currentCharging: charging, event,
+    pendingEvent: ['start', 'update', 'end'].includes(durable?.pending?.event) ? durable.pending.event : null,
+    pendingAttempts: Number.isInteger(durable?.pending?.attempts) ? durable.pending.attempts : null });
   const nextState = { ...current, startedAt: started ? new Date(now).toISOString() : previous.startedAt };
   if (!event) {
     if (durable?.pending) await durableStorage.put({ [durableKey]: { ...durable, pending: null },
@@ -295,7 +306,10 @@ async function monitorAuthorization(env, key, record, fetchImpl, now, durableSto
     const old = durable?.pending;
     const pending = old?.event === event && now - old.windowStart < 900_000
       ? old : { event, windowStart: now, attempts: 0 };
-    if (pending.attempts >= 3) return;
+    if (pending.attempts >= 3) {
+      chargingDiagnostic(now, { stage: 'retry-limit', event, kind });
+      return;
+    }
     await durableStorage.put({ [durableKey]: { ...durable, pending: { ...pending, attempts: pending.attempts + 1 } },
       activeOwner: { key, enrollmentID: enrollment.enrollmentID } });
   }
@@ -310,6 +324,10 @@ async function monitorAuthorization(env, key, record, fetchImpl, now, durableSto
     // favors delivery over uniqueness, especially for push-to-start.
     result = { outcome: 'retryable' };
   }
+  chargingDiagnostic(now, { stage: 'apns', event, kind, outcome: result.outcome,
+    status: Number.isInteger(result.status) ? result.status : null,
+    reason: ['ExpiredToken', 'Unregistered', 'BadDeviceToken', 'DeviceTokenNotForTopic'].includes(result.reason) ? result.reason : null,
+    tokenPresent: !!token });
   if (result.outcome === 'sent') {
     if (durableStorage) {
       // Atomically commit the delivery and its owner; stale KV must not select
@@ -376,6 +394,8 @@ export class MonitoringCoordinatorCore {
         } catch { /* isolate malformed registrations */ }
       }
       const active = await this.storage.get('activeOwner');
+      chargingDiagnostic(now, { stage: 'coordinator', candidates: group.length, activeOwner: !!active,
+        ownerUnavailable: active?.unavailableSince != null });
       // The index is eventually consistent and can omit a still-active owner.
       // Read that owner directly before considering another registration.
       let chosen;

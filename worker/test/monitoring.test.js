@@ -295,6 +295,20 @@ async function apnsResponseScenario(status, reason, rotate = false) {
   return { targetEnv, tokenKeys, rotatedRecord, monitoringError: auth.monitoringError };
 }
 
+test('diagnostics identify APNs event and token kind without arbitrary response text', async () => {
+  const logs = [];
+  const original = console.log;
+  console.log = (...args) => logs.push(args);
+  try { await apnsResponseScenario(410, 'sensitive-untrusted-response'); }
+  finally { console.log = original; }
+  const diagnostic = logs.filter(entry => entry[0] === 'charging-diagnostic').map(entry => JSON.parse(entry[1]));
+  const apns = diagnostic.find(entry => entry.stage === 'apns');
+  assert.deepEqual(apns, { stage: 'apns', event: 'start', kind: 'pushToStart', outcome: 'invalidToken', status: 410, reason: null, tokenPresent: true });
+  assert.ok(diagnostic.some(entry => entry.stage === 'state' && entry.previousCharging === false && entry.currentCharging === true));
+  assert.ok(!JSON.stringify(logs).includes('sensitive-untrusted-response'));
+  assert.ok(!JSON.stringify(logs).includes('push-token'));
+});
+
 test('APNs 400 keeps the push token and records the reason', async () => {
   const { tokenKeys, monitoringError } = await apnsResponseScenario(400, 'BadMessage');
   assert.equal(tokenKeys.length, 1, 'a 400 must NOT delete the push-to-start token');
